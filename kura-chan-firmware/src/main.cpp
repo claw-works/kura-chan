@@ -59,7 +59,7 @@ void draw_face(bool blink) {
 
     // Smile - draw arc using small filled circle segments
     for (int i = -MOUTH_W / 2; i <= MOUTH_W / 2; i++) {
-        int y_offset = (i * i) / 80; // Parabola for smile curve
+        int y_offset = -(i * i) / 80 + 10; // Inverted parabola for smile
         lcd.fillCircle(SCREEN_W / 2 + i, MOUTH_Y + y_offset, 3, MOUTH_COLOR);
     }
 
