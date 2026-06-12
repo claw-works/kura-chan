@@ -13,7 +13,7 @@ void WsClient::begin(const char* host, uint16_t port, const char* path,
     ws_.begin(host, port, path);
     ws_.setExtraHeaders(headers.c_str());
     ws_.onEvent(eventCallback);
-    ws_.setReconnectInterval(0); // We handle reconnection ourselves
+    ws_.setReconnectInterval(5000); // Auto-reconnect every 5s
 
     setState(WsState::Connecting);
     Serial.printf("[WS] Connecting to %s:%d%s\n", host, port, path);
@@ -21,16 +21,6 @@ void WsClient::begin(const char* host, uint16_t port, const char* path,
 
 void WsClient::update() {
     ws_.loop();
-
-    // Handle reconnection with exponential backoff
-    if (state_ == WsState::Disconnected) {
-        uint32_t now = millis();
-        if (now - last_disconnect_ms_ > reconnect_delay_ms_) {
-            Serial.printf("[WS] Reconnecting (backoff: %lums)...\n", reconnect_delay_ms_);
-            ws_.setReconnectInterval(reconnect_delay_ms_);
-            setState(WsState::Connecting);
-        }
-    }
 }
 
 void WsClient::disconnect() {

@@ -9,13 +9,12 @@ struct WifiCredential {
 };
 
 static const WifiCredential WIFI_CREDENTIALS[] = {
-    {"YOUR_WIFI_SSID_1", "YOUR_WIFI_PASSWORD_1"},
-    {"YOUR_WIFI_SSID_2", "YOUR_WIFI_PASSWORD_2"},
+    {"YOUR_WIFI_SSID", "YOUR_WIFI_PASSWORD"},
 };
 static const int WIFI_CREDENTIAL_COUNT = sizeof(WIFI_CREDENTIALS) / sizeof(WIFI_CREDENTIALS[0]);
 
 // Server configuration
-static const char* SERVER_HOST = "192.168.1.100";  // Your Mac's LAN IP
+static const char* SERVER_HOST = "192.168.1.100";  // Your server's LAN IP
 static const uint16_t SERVER_PORT = 8080;
 static const char* SERVER_PATH = "/ws/device";
 

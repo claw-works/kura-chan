@@ -42,7 +42,7 @@ void draw_status_bar() {
     // Wi-Fi status
     lcd.setCursor(4, 4);
     if (wifi_mgr.isConnected()) {
-        lcd.printf("WiFi:%s %ddBm", wifi_mgr.getConnectedSSID().c_str(), wifi_mgr.getRSSI());
+        lcd.printf("%s %s", wifi_mgr.getIP().c_str(), wifi_mgr.getConnectedSSID().c_str());
     } else {
         lcd.print("WiFi: connecting...");
     }
