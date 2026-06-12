@@ -1,12 +1,21 @@
+mod auth;
 mod config;
 mod error;
-mod ws;
-mod speech;
 mod harness;
-mod auth;
+mod router;
+mod speech;
+mod ws;
 
-use config::Config;
+use std::sync::Arc;
+
+use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
+
+use crate::config::Config;
+use crate::harness::HarnessClient;
+use crate::speech::mock_stt::MockStt;
+use crate::speech::mock_tts::MockTts;
+use crate::ws::AppState;
 
 #[tokio::main]
 async fn main() {
@@ -18,5 +27,23 @@ async fn main() {
         .init();
 
     let config = Config::load().expect("Failed to load configuration");
-    tracing::info!("Config loaded: listening on {}:{}", config.server.host, config.server.port);
+    let config = Arc::new(config);
+
+    let harness = HarnessClient::new(&config.aws).await;
+    tracing::info!("Harness client initialized");
+
+    let state = Arc::new(AppState {
+        config: config.clone(),
+        harness,
+        stt: Box::new(MockStt),
+        tts: Box::new(MockTts),
+    });
+
+    let app = router::create_router(state);
+
+    let addr = format!("{}:{}", config.server.host, config.server.port);
+    let listener = TcpListener::bind(&addr).await.expect("Failed to bind");
+    tracing::info!("Kura-chan server listening on {}", addr);
+
+    axum::serve(listener, app).await.expect("Server error");
 }

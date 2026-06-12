@@ -1,12 +1,19 @@
 pub mod mock_stt;
 pub mod mock_tts;
 
-#[allow(async_fn_in_trait)]
+use std::future::Future;
+use std::pin::Pin;
+
 pub trait SpeechToText: Send + Sync {
-    async fn transcribe(&self, audio: &[u8]) -> Result<String, Box<dyn std::error::Error + Send + Sync>>;
+    fn transcribe<'a>(
+        &'a self,
+        audio: &'a [u8],
+    ) -> Pin<Box<dyn Future<Output = Result<String, Box<dyn std::error::Error + Send + Sync>>> + Send + 'a>>;
 }
 
-#[allow(async_fn_in_trait)]
 pub trait TextToSpeech: Send + Sync {
-    async fn synthesize(&self, text: &str) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>>;
+    fn synthesize<'a>(
+        &'a self,
+        text: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>>> + Send + 'a>>;
 }
