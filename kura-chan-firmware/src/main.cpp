@@ -40,16 +40,18 @@ void draw_status_bar() {
     lcd.setFont(&fonts::Font0);
     lcd.setTextSize(1);
 
-    // Wi-Fi status
+    // Wi-Fi status - direct check
     lcd.setCursor(4, 4);
-    if (wifi_mgr.isConnected()) {
-        lcd.printf("%s %s", wifi_mgr.getIP().c_str(), wifi_mgr.getConnectedSSID().c_str());
+    int wst = WiFi.status();
+    if (wst == WL_CONNECTED) {
+        lcd.printf("%s %s", WiFi.localIP().toString().c_str(), WiFi.SSID().c_str());
     } else {
-        lcd.print("WiFi: connecting...");
+        lcd.printf("WiFi:%d yiyi-pro", wst);
     }
 
-    // WS status
-    lcd.setCursor(220, 4);
+    // Version + WS status
+    lcd.setCursor(200, 4);
+    lcd.print("v6 ");
     switch (ws_client.getState()) {
         case WsState::Disconnected: lcd.print("WS:off"); break;
         case WsState::Connecting:   lcd.print("WS:..."); break;
@@ -136,14 +138,18 @@ void setup() {
     M5.Display.setBrightness(128);
     M5.Display.fillScreen(BG_COLOR);
 
-    Serial.println("Kura-chan firmware v0.3 starting...");
+    Serial.println("Kura-chan firmware v4 starting...");
 
     // Load persistent config
     configStore.begin();
     configStore.dump();
 
-    // Init Wi-Fi
-    wifi_mgr.begin();
+    // Init Wi-Fi - direct, no manager
+    WiFi.mode(WIFI_STA);
+    WiFi.setMinSecurity(WIFI_AUTH_WPA_PSK);
+    delay(100);
+    WiFi.begin("yiyi-pro", "99999999");
+    delay(5000); // Wait for connection
 
     // Setup WebSocket callbacks
     ws_client.onJson(on_ws_message);
@@ -161,12 +167,11 @@ void loop() {
     M5.update();
     uint32_t now = millis();
 
-    // Network stack
-    wifi_mgr.update();
+    // Network stack (wifi_mgr disabled, using direct WiFi)
 
     // Start WS connection once Wi-Fi is up
     static bool ws_started = false;
-    if (wifi_mgr.isConnected() && !ws_started) {
+    if (WiFi.status() == WL_CONNECTED && !ws_started) {
         ws_client.begin(
             configStore.getServerHost().c_str(),
             configStore.getServerPort(),
@@ -177,10 +182,10 @@ void loop() {
         ws_started = true;
         draw_status_bar();
     }
-    if (wifi_mgr.isConnected() && ws_started) {
+    if (WiFi.status() == WL_CONNECTED && ws_started) {
         ws_client.update();
     }
-    if (!wifi_mgr.isConnected() && ws_started) {
+    if (WiFi.status() != WL_CONNECTED && ws_started) {
         ws_started = false;
         ws_client.disconnect();
         draw_status_bar();

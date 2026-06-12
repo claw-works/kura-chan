@@ -5,18 +5,18 @@ ConfigStore configStore;
 void ConfigStore::begin() {
     prefs_.begin("kura", false);
 
-    // First boot: write defaults if no config exists
-    if (!prefs_.isKey("init")) {
-        Serial.println("[Config] First boot, writing defaults...");
-        prefs_.putBool("init", true);
-        prefs_.putString("srv_host", "192.168.1.100");
+    // Write defaults on first boot (or after factory reset)
+    if (!prefs_.isKey("v3")) {
+        prefs_.clear();
+        Serial.println("[Config] Initializing config...");
+        prefs_.putBool("v3", true);
+        prefs_.putString("srv_host", "192.168.31.249");
         prefs_.putUShort("srv_port", 8080);
         prefs_.putString("srv_path", "/ws/device");
         prefs_.putString("api_key", "dev_key_001");
         prefs_.putString("device_id", "KURA_CHAN_001");
-        // Default WiFi
         prefs_.putString("ws0", "yiyi-pro");
-        prefs_.putString("wp0", "88889999");
+        prefs_.putString("wp0", "99999999");
         prefs_.putUChar("wifi_cnt", 1);
     }
 }

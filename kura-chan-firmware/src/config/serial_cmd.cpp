@@ -1,5 +1,6 @@
 #include "serial_cmd.h"
 #include "config_store.h"
+#include <Preferences.h>
 
 static String cmd_buffer;
 
@@ -38,6 +39,14 @@ static void process_command(const String& cmd) {
         Serial.println("OK (reboot to apply)");
     } else if (trimmed == "config") {
         configStore.dump();
+    } else if (trimmed == "factory") {
+        Preferences p;
+        p.begin("kura", false);
+        p.clear();
+        p.end();
+        Serial.println("NVS cleared. Rebooting...");
+        delay(100);
+        ESP.restart();
     } else if (trimmed == "reboot") {
         Serial.println("Rebooting...");
         delay(100);
