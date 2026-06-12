@@ -14,7 +14,10 @@ void ConfigStore::begin() {
         prefs_.putString("srv_path", "/ws/device");
         prefs_.putString("api_key", "dev_key_001");
         prefs_.putString("device_id", "KURA_CHAN_001");
-        prefs_.putUChar("wifi_cnt", 0);
+        // Default WiFi
+        prefs_.putString("ws0", "yiyi-pro");
+        prefs_.putString("wp0", "88889999");
+        prefs_.putUChar("wifi_cnt", 1);
     }
 }
 
