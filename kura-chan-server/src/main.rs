@@ -2,6 +2,8 @@ mod config;
 mod error;
 mod ws;
 mod speech;
+mod harness;
+mod auth;
 
 use config::Config;
 use tracing_subscriber::EnvFilter;
