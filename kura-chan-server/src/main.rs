@@ -1,5 +1,7 @@
 mod config;
 mod error;
+mod ws;
+mod speech;
 
 use config::Config;
 use tracing_subscriber::EnvFilter;
