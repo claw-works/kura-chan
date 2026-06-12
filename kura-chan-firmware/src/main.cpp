@@ -1,6 +1,7 @@
-// Kura-chan Firmware V0.2 - Wi-Fi + WebSocket + Face
+// Kura-chan Firmware V0.3 - NVS Config + Serial Commands
 #include <M5Unified.h>
-#include "config/config.h"
+#include "config/config_store.h"
+#include "config/serial_cmd.h"
 #include "wifi/wifi_manager.h"
 #include "ws/ws_client.h"
 
@@ -119,7 +120,10 @@ void on_ws_message(JsonDocument& doc) {
 
 void on_ws_state_change(WsState state) {
     if (state == WsState::Connected) {
-        ws_client.sendHello(DEVICE_ID, FIRMWARE_VERSION);
+        ws_client.sendHello(
+            configStore.getDeviceId().c_str(),
+            "0.3.0"
+        );
     }
     draw_status_bar();
 }
@@ -132,7 +136,11 @@ void setup() {
     M5.Display.setBrightness(128);
     M5.Display.fillScreen(BG_COLOR);
 
-    Serial.println("Kura-chan firmware v0.2 starting...");
+    Serial.println("Kura-chan firmware v0.3 starting...");
+
+    // Load persistent config
+    configStore.begin();
+    configStore.dump();
 
     // Init Wi-Fi
     wifi_mgr.begin();
@@ -159,7 +167,13 @@ void loop() {
     // Start WS connection once Wi-Fi is up
     static bool ws_started = false;
     if (wifi_mgr.isConnected() && !ws_started) {
-        ws_client.begin(SERVER_HOST, SERVER_PORT, SERVER_PATH, API_KEY, DEVICE_ID);
+        ws_client.begin(
+            configStore.getServerHost().c_str(),
+            configStore.getServerPort(),
+            configStore.getServerPath().c_str(),
+            configStore.getApiKey().c_str(),
+            configStore.getDeviceId().c_str()
+        );
         ws_started = true;
         draw_status_bar();
     }
@@ -171,6 +185,9 @@ void loop() {
         ws_client.disconnect();
         draw_status_bar();
     }
+
+    // Serial commands
+    serial_cmd_update();
 
     // Blink animation
     if (!is_blinking && (now - last_blink_ms > blink_interval_ms)) {

@@ -1,16 +1,18 @@
 #include "wifi_manager.h"
-#include "../config/config.h"
+#include "../config/config_store.h"
 
 void WifiManager::begin() {
     WiFi.mode(WIFI_STA);
     WiFi.setAutoReconnect(true);
+    wifi_list_ = configStore.getWifiList();
     state_ = WifiState::Disconnected;
-    Serial.println("[WiFi] Manager initialized");
+    Serial.printf("[WiFi] Manager initialized, %d networks configured\n", wifi_list_.size());
 }
 
 void WifiManager::update() {
     switch (state_) {
         case WifiState::Disconnected: {
+            if (wifi_list_.empty()) break;
             uint32_t now = millis();
             if (now - last_attempt_ms_ > RETRY_INTERVAL_MS) {
                 tryNextNetwork();
@@ -24,10 +26,10 @@ void WifiManager::update() {
                     WiFi.SSID().c_str(), WiFi.localIP().toString().c_str());
             } else if (millis() - connect_start_ms_ > CONNECT_TIMEOUT_MS) {
                 Serial.printf("[WiFi] Timeout connecting to %s\n",
-                    WIFI_CREDENTIALS[current_credential_index_].ssid);
+                    wifi_list_[current_credential_index_].ssid.c_str());
                 WiFi.disconnect();
                 state_ = WifiState::Disconnected;
-                current_credential_index_ = (current_credential_index_ + 1) % WIFI_CREDENTIAL_COUNT;
+                current_credential_index_ = (current_credential_index_ + 1) % wifi_list_.size();
                 last_attempt_ms_ = millis();
             }
             break;
@@ -36,7 +38,7 @@ void WifiManager::update() {
             if (WiFi.status() != WL_CONNECTED) {
                 Serial.println("[WiFi] Connection lost, reconnecting...");
                 state_ = WifiState::Disconnected;
-                last_attempt_ms_ = millis() - RETRY_INTERVAL_MS; // Retry immediately
+                last_attempt_ms_ = millis() - RETRY_INTERVAL_MS;
             }
             break;
         }
@@ -64,11 +66,11 @@ int WifiManager::getRSSI() {
 }
 
 void WifiManager::tryNextNetwork() {
-    const auto& cred = WIFI_CREDENTIALS[current_credential_index_];
+    const auto& entry = wifi_list_[current_credential_index_];
     Serial.printf("[WiFi] Trying %s (%d/%d)...\n",
-        cred.ssid, current_credential_index_ + 1, WIFI_CREDENTIAL_COUNT);
+        entry.ssid.c_str(), current_credential_index_ + 1, wifi_list_.size());
 
-    WiFi.begin(cred.ssid, cred.password);
+    WiFi.begin(entry.ssid.c_str(), entry.password.c_str());
     state_ = WifiState::Connecting;
     connect_start_ms_ = millis();
     last_attempt_ms_ = millis();

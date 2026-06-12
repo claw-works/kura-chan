@@ -2,6 +2,8 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
+#include <vector>
+#include "../config/config_store.h"
 
 enum class WifiState {
     Disconnected,
@@ -24,6 +26,7 @@ private:
     uint32_t last_attempt_ms_ = 0;
     int current_credential_index_ = 0;
     uint32_t connect_start_ms_ = 0;
+    std::vector<WifiEntry> wifi_list_;
     static constexpr uint32_t CONNECT_TIMEOUT_MS = 10000;
     static constexpr uint32_t RETRY_INTERVAL_MS = 5000;
 
