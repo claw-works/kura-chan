@@ -1,5 +1,6 @@
 pub mod mock_stt;
 pub mod mock_tts;
+pub mod volc;
 
 use std::future::Future;
 use std::pin::Pin;

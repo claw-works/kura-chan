@@ -19,6 +19,9 @@ pub struct Session {
     pub state: SessionState,
     pub audio_buffer: Vec<u8>,
     pub config: Arc<Config>,
+    pub battery: Option<i32>,
+    pub charging: Option<bool>,
+    pub volume: Option<i32>,
 }
 
 pub enum SessionEvent {
@@ -34,6 +37,9 @@ impl Session {
             state: SessionState::Idle,
             audio_buffer: Vec::new(),
             config,
+            battery: None,
+            charging: None,
+            volume: None,
         }
     }
 
@@ -107,5 +113,31 @@ impl Session {
 
     pub fn handle_tool_result(&mut self, _result: ToolResult) -> Vec<SessionEvent> {
         vec![]
+    }
+
+    pub fn handle_status(&mut self, status: DeviceStatus) -> Vec<SessionEvent> {
+        if let Some(b) = status.battery { self.battery = Some(b); }
+        if let Some(c) = status.charging { self.charging = Some(c); }
+        if let Some(v) = status.volume { self.volume = Some(v); }
+        tracing::debug!(battery = ?self.battery, charging = ?self.charging, volume = ?self.volume, "Device status");
+        vec![]
+    }
+
+    /// Build the user message sent to the agent, optionally prefixed with a
+    /// concise device-state line so the agent can answer battery/volume queries.
+    pub fn build_user_message(&self, utterance: &str) -> String {
+        let mut ctx = String::new();
+        if self.battery.is_some() || self.volume.is_some() {
+            ctx.push_str("[设备状态]");
+            if let Some(b) = self.battery {
+                ctx.push_str(&format!(" 电量{}%", b));
+                if self.charging == Some(true) { ctx.push_str("(充电中)"); }
+            }
+            if let Some(v) = self.volume {
+                ctx.push_str(&format!(" 音量{}%", v));
+            }
+            ctx.push('\n');
+        }
+        format!("{}{}", ctx, utterance)
     }
 }

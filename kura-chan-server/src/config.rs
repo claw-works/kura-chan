@@ -6,6 +6,7 @@ pub struct Config {
     pub server: ServerConfig,
     pub auth: AuthConfig,
     pub aws: AwsConfig,
+    pub agent: AgentConfig,
     pub speech: SpeechConfig,
     pub session: SessionConfig,
 }
@@ -27,10 +28,27 @@ pub struct AwsConfig {
     pub harness_arn: String,
 }
 
+/// Agent persona / behaviour, injected as the system prompt on every
+/// invoke_harness call (overrides the harness default).
+#[derive(Debug, Deserialize, Clone)]
+pub struct AgentConfig {
+    #[serde(default)]
+    pub system_prompt: String,
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct SpeechConfig {
     pub stt_provider: String,
     pub tts_provider: String,
+    /// Volcengine ASR resource id, e.g. "volc.seedasr.sauc.concurrent"
+    #[serde(default)]
+    pub volc_asr_resource_id: String,
+    /// Volcengine TTS resource id, e.g. "seed-tts-2.0"
+    #[serde(default)]
+    pub volc_tts_resource_id: String,
+    /// Volcengine TTS voice/speaker id, e.g. "zh_female_sajiaoxuemei_uranus_bigtts"
+    #[serde(default)]
+    pub volc_tts_voice: String,
 }
 
 #[derive(Debug, Deserialize, Clone)]

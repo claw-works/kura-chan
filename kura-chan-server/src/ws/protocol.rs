@@ -7,6 +7,14 @@ use serde::{Deserialize, Serialize};
 pub enum ClientMessage {
     Hello(ClientHello),
     ToolResult(ToolResult),
+    Status(DeviceStatus),
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DeviceStatus {
+    pub battery: Option<i32>,
+    pub charging: Option<bool>,
+    pub volume: Option<i32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -46,6 +54,21 @@ pub enum ServerMessage {
     Response(AgentResponse),
     ToolCall(ToolCall),
     Error(ErrorMessage),
+    /// Actuator command for the device (volume / led / turn).
+    Control(ControlMessage),
+    /// Sent after all streamed audio for a reply has been pushed.
+    SpeakDone,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ControlMessage {
+    pub action: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dir: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

@@ -15,6 +15,8 @@ use crate::config::Config;
 use crate::harness::HarnessClient;
 use crate::speech::mock_stt::MockStt;
 use crate::speech::mock_tts::MockTts;
+use crate::speech::volc::{VolcStt, VolcTts};
+use crate::speech::{SpeechToText, TextToSpeech};
 use crate::ws::AppState;
 
 #[tokio::main]
@@ -29,14 +31,18 @@ async fn main() {
     let config = Config::load().expect("Failed to load configuration");
     let config = Arc::new(config);
 
-    let harness = HarnessClient::new(&config.aws).await;
+    let harness = HarnessClient::new(&config.aws, config.agent.system_prompt.clone()).await;
     tracing::info!("Harness client initialized");
+
+    let stt = build_stt(&config);
+    let tts = build_tts(&config);
 
     let state = Arc::new(AppState {
         config: config.clone(),
         harness,
-        stt: Box::new(MockStt),
-        tts: Box::new(MockTts),
+        stt,
+        tts,
+        canned: tokio::sync::Mutex::new(std::collections::HashMap::new()),
     });
 
     let app = router::create_router(state);
@@ -46,4 +52,46 @@ async fn main() {
     tracing::info!("Kura-chan server listening on {}", addr);
 
     axum::serve(listener, app).await.expect("Server error");
+}
+
+fn build_stt(config: &Config) -> Box<dyn SpeechToText> {
+    match config.speech.stt_provider.as_str() {
+        "volc" => match std::env::var("VOLC_API_KEY") {
+            Ok(key) if !key.is_empty() => {
+                tracing::info!("STT: Volcengine ASR");
+                Box::new(VolcStt::new(key, config.speech.volc_asr_resource_id.clone()))
+            }
+            _ => {
+                tracing::warn!("VOLC_API_KEY not set; STT falling back to mock");
+                Box::new(MockStt)
+            }
+        },
+        _ => {
+            tracing::info!("STT: mock");
+            Box::new(MockStt)
+        }
+    }
+}
+
+fn build_tts(config: &Config) -> Box<dyn TextToSpeech> {
+    match config.speech.tts_provider.as_str() {
+        "volc" => match std::env::var("VOLC_API_KEY") {
+            Ok(key) if !key.is_empty() => {
+                tracing::info!("TTS: Volcengine TTS");
+                Box::new(VolcTts::new(
+                    key,
+                    config.speech.volc_tts_resource_id.clone(),
+                    config.speech.volc_tts_voice.clone(),
+                ))
+            }
+            _ => {
+                tracing::warn!("VOLC_API_KEY not set; TTS falling back to mock");
+                Box::new(MockTts)
+            }
+        },
+        _ => {
+            tracing::info!("TTS: mock");
+            Box::new(MockTts)
+        }
+    }
 }

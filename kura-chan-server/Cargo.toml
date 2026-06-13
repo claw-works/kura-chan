@@ -11,17 +11,22 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 figment = { version = "0.10", features = ["toml", "env"] }
 aws-config = { version = "1", features = ["behavior-version-latest"] }
-aws-sdk-bedrockagentruntime = "1"
+aws-sdk-bedrockagentcore = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4"] }
 bytes = "1"
 thiserror = "2"
 futures-util = "0.3"
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 
 [dev-dependencies]
 tokio-tungstenite = "0.26"
 serde_json = "1"
 
+# aws-runtime 1.7.4 (latest published) fails to compile its event-stream SigV4
+# signer (src/auth/sigv4.rs: "cannot infer type parameter T" on `send`).
+# AgentCore's invoke_harness uses event streams, which enables that code path.
+# This vendored copy carries the turbofish fix. Remove once upstream ships a fix.
 [patch.crates-io]
 aws-runtime = { path = "patches/aws-runtime" }
