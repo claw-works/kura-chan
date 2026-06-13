@@ -7,7 +7,8 @@ api_keys = ["dev_key_001"]
 
 [aws]
 region = "us-west-2"
-harness_arn = "arn:aws:bedrock-agentcore:us-west-2:320236118172:harness/hare_assistant-OSFLWOjkBy"
+# harness_arn 不入 git。请通过环境变量 HARNESS_ARN 设置(账号相关)。
+harness_arn = ""
 
 [agent]
 # Persona / behaviour injected as the system prompt on every invoke_harness call.

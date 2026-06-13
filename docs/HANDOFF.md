@@ -50,8 +50,9 @@ kura-chan/
 
 - **火山 API Key 只放运行时环境变量** `VOLC_API_KEY`,**绝不入 git**。
   请通过安全渠道(密码管理器/私下传递)携带该值,不要写进代码、配置或文档。
-- `config/default.toml` 放可提交内容:火山 resource id、音色、AgentCore harness ARN、小爪 system_prompt。
-- AgentCore harness ARN:`arn:aws:bedrock-agentcore:us-west-2:320236118172:harness/hare_assistant-OSFLWOjkBy`
+- `config/default.toml` 放可提交内容:火山 resource id、音色、小爪 system_prompt。
+- **AgentCore harness ARN 也走环境变量** `HARNESS_ARN`(账号相关,不入 git);
+  `config/default.toml` 里的 `harness_arn` 留空。region 可用 `AWS_REGION` 覆盖(默认 us-west-2)。
 - 设备鉴权:`Authorization: Bearer dev_key_001` + `X-Device-Id`(server 侧目前鉴权放宽便于调试)。
 
 ## 5. 运行服务端
@@ -61,14 +62,14 @@ kura-chan/
 ```bash
 cd kura-chan-server
 cargo build
-VOLC_API_KEY=<你的key> RUST_LOG=info,kura_chan_server=debug \
+VOLC_API_KEY=<你的key> HARNESS_ARN=<harness arn> RUST_LOG=info,kura_chan_server=debug \
   ./target/debug/kura-chan-server
 # 监听 0.0.0.0:8080
 ```
 
 后台跑(开发常用):
 ```bash
-VOLC_API_KEY=<key> RUST_LOG=info,kura_chan_server=debug \
+VOLC_API_KEY=<key> HARNESS_ARN=<arn> RUST_LOG=info,kura_chan_server=debug \
   nohup ./target/debug/kura-chan-server > /tmp/kura-server.log 2>&1 &
 tail -f /tmp/kura-server.log
 ```

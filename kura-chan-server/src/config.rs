@@ -24,8 +24,16 @@ pub struct AuthConfig {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct AwsConfig {
+    #[serde(default = "default_region")]
     pub region: String,
+    /// AgentCore harness ARN. Keep out of committed config; set via env
+    /// `HARNESS_ARN` (account-specific). See Config::load.
+    #[serde(default)]
     pub harness_arn: String,
+}
+
+fn default_region() -> String {
+    "us-west-2".to_string()
 }
 
 /// Agent persona / behaviour, injected as the system prompt on every
@@ -59,9 +67,23 @@ pub struct SessionConfig {
 
 impl Config {
     pub fn load() -> Result<Self, figment::Error> {
-        Figment::new()
+        let mut cfg: Config = Figment::new()
             .merge(Toml::file("config/default.toml"))
             .merge(Env::prefixed("KURA_").split("_"))
-            .extract()
+            .extract()?;
+        // Explicit env overrides for AWS settings (kept out of committed config).
+        // figment's split("_") can't bind underscored fields like `harness_arn`.
+        if let Ok(arn) = std::env::var("HARNESS_ARN") {
+            cfg.aws.harness_arn = arn;
+        }
+        if let Ok(region) = std::env::var("AWS_REGION") {
+            cfg.aws.region = region;
+        }
+        if cfg.aws.harness_arn.is_empty() {
+            tracing::warn!(
+                "harness_arn is empty; set the HARNESS_ARN environment variable"
+            );
+        }
+        Ok(cfg)
     }
 }
