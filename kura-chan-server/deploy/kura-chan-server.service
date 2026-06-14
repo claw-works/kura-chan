@@ -1,0 +1,21 @@
+# systemd 开机自启单元（可选）。把 __ROOT__ 换成 server 绝对路径，__USER__ 换成运行用户。
+# 安装：
+#   sed -e "s#__ROOT__#$PWD#g" -e "s#__USER__#$USER#g" deploy/kura-chan-server.service | sudo tee /etc/systemd/system/kura-chan-server.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now kura-chan-server
+#   journalctl -u kura-chan-server -f
+[Unit]
+Description=Kura-chan server (STT->AgentCore->TTS relay)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__ROOT__
+EnvironmentFile=__ROOT__/deploy/kura-server.env
+ExecStart=__ROOT__/target/release/kura-chan-server
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

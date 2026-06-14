@@ -10,14 +10,32 @@ void ConfigStore::begin() {
         prefs_.clear();
         Serial.println("[Config] Initializing config...");
         prefs_.putBool("v3", true);
-        prefs_.putString("srv_host", "192.168.31.249");
-        prefs_.putUShort("srv_port", 8080);
+        prefs_.putString("srv_host", "54.187.154.83");
+        prefs_.putUShort("srv_port", 8866);
         prefs_.putString("srv_path", "/ws/device");
         prefs_.putString("api_key", "dev_key_001");
         prefs_.putString("device_id", "KURA_CHAN_001");
-        prefs_.putString("ws0", "yiyi-pro");
-        prefs_.putString("wp0", "99999999");
+        prefs_.putString("ws0", "松善");
+        prefs_.putString("wp0", "66668888");
         prefs_.putUChar("wifi_cnt", 1);
+    }
+
+    // Config migration by revision. NVS keys must be <=15 chars, so we use a
+    // single short "cfg_rev" counter instead of one boolean key per migration
+    // (those long keys silently failed with KEY_TOO_LONG and re-ran every boot).
+    // To re-point WiFi/server on already-provisioned devices: update the values
+    // below and bump CFG_REV.
+    constexpr uint8_t CFG_REV = 2;
+    if (prefs_.getUChar("cfg_rev", 0) < CFG_REV) {
+        prefs_.putString("ws0", "松善");
+        prefs_.putString("wp0", "66668888");
+        if (prefs_.getUChar("wifi_cnt", 0) < 1) {
+            prefs_.putUChar("wifi_cnt", 1);
+        }
+        prefs_.putString("srv_host", "54.187.154.83");
+        prefs_.putUShort("srv_port", 8866);
+        prefs_.putUChar("cfg_rev", CFG_REV);
+        Serial.println("[Config] migrated rev2: WiFi=松善 srv=54.187.154.83:8866");
     }
 }
 

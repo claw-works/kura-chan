@@ -714,6 +714,7 @@ void webSocketEvent(WStype_t type, uint8_t* payload, size_t length) {
 void setup() {
     auto cfg = M5.config();
     M5.begin(cfg);
+    Serial.begin(115200);
     M5.Display.setRotation(1);
     M5.Display.setBrightness(128);
     M5.Display.fillScreen(BG_COLOR);
@@ -733,16 +734,34 @@ void setup() {
 
     WiFi.mode(WIFI_STA);
     WiFi.setAutoReconnect(true);
+    // Robust association on WPA2/WPA3-mixed nets: scan all channels and pick the
+    // strongest BSSID instead of latching onto the first match (FAST_SCAN default).
+    WiFi.setScanMethod(WIFI_ALL_CHANNEL_SCAN);
+    WiFi.setSortMethod(WIFI_CONNECT_AP_BY_SIGNAL);
+    // Log association result + disconnect reason code so failures are diagnosable.
+    WiFi.onEvent([](WiFiEvent_t e, WiFiEventInfo_t info) {
+        if (e == ARDUINO_EVENT_WIFI_STA_CONNECTED) {
+            Serial.println("[WiFi] STA_CONNECTED");
+        } else if (e == ARDUINO_EVENT_WIFI_STA_GOT_IP) {
+            Serial.printf("[WiFi] GOT_IP %s\n", WiFi.localIP().toString().c_str());
+        } else if (e == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
+            Serial.printf("[WiFi] DISCONNECTED reason=%d\n",
+                          info.wifi_sta_disconnected.reason);
+        }
+    });
     {
         auto wifis = configStore.getWifiList();
         if (!wifis.empty()) {
+            Serial.printf("[WiFi] connecting to '%s'...\n", wifis[0].ssid.c_str());
             WiFi.begin(wifis[0].ssid.c_str(), wifis[0].password.c_str());
         } else {
-            WiFi.begin("yiyi-pro", "99999999");
+            WiFi.begin("松善", "66668888");
         }
     }
     uint32_t t0 = millis();
     while (WiFi.status() != WL_CONNECTED && millis() - t0 < 15000) delay(100);
+    Serial.printf("[WiFi] result: status=%d ip=%s\n",
+                  WiFi.status(), WiFi.localIP().toString().c_str());
     draw_status_bar();
 
     String headers = String("Authorization: Bearer ") + configStore.getApiKey() +
@@ -753,6 +772,10 @@ void setup() {
     // NOTE: no enableHeartbeat — the server processes a turn synchronously and
     // can't answer pings during long inference, so heartbeat would false-trip a
     // disconnect mid-THINK. On LAN the idle TCP stays alive fine.
+    Serial.printf("[WS] dialing %s:%d%s\n",
+                  configStore.getServerHost().c_str(),
+                  configStore.getServerPort(),
+                  configStore.getServerPath().c_str());
     webSocket.begin(configStore.getServerHost().c_str(),
                     configStore.getServerPort(),
                     configStore.getServerPath().c_str());

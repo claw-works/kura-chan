@@ -27,6 +27,7 @@ void WifiManager::update() {
                 last_error_ = "Timeout(status=" + String(WiFi.status()) + ")";
                 Serial.printf("[WiFi] %s\n", last_error_.c_str());
                 WiFi.disconnect();
+                current_credential_index_++;  // round-robin to next network
                 state_ = WifiState::Disconnected;
                 last_attempt_ms_ = millis();
             }
@@ -60,7 +61,9 @@ String WifiManager::getConnectedSSID() {
 }
 
 String WifiManager::getConnectingSSID() {
-    return "yiyi-pro";
+    if (wifi_list_.empty()) return "";
+    int idx = current_credential_index_ % (int)wifi_list_.size();
+    return wifi_list_[idx].ssid;
 }
 
 String WifiManager::getLastError() {
@@ -72,9 +75,17 @@ int WifiManager::getRSSI() {
 }
 
 void WifiManager::tryNextNetwork() {
-    Serial.println("[WiFi] Calling WiFi.begin(yiyi-pro, 99999999)...");
-    last_error_ = "begin() called";
-    WiFi.begin("yiyi-pro", "99999999");
+    if (wifi_list_.empty()) {
+        last_error_ = "No WiFi configured";
+        Serial.println("[WiFi] No networks configured");
+        last_attempt_ms_ = millis();
+        return;
+    }
+    current_credential_index_ %= (int)wifi_list_.size();
+    const WifiEntry& e = wifi_list_[current_credential_index_];
+    Serial.printf("[WiFi] Calling WiFi.begin(%s)...\n", e.ssid.c_str());
+    last_error_ = "begin() called: " + e.ssid;
+    WiFi.begin(e.ssid.c_str(), e.password.c_str());
     state_ = WifiState::Connecting;
     connect_start_ms_ = millis();
     last_attempt_ms_ = millis();
