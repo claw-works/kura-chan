@@ -514,7 +514,9 @@ static void send_status() {
     JsonDocument doc;
     doc["type"] = "status";
     doc["battery"] = M5.Power.getBatteryLevel();   // 0..100
-    doc["charging"] = M5.Power.isCharging();
+    // isCharging() returns an enum (is_charging_t), not bool — cast so JSON
+    // emits true/false (server expects a JSON boolean, not integer 0/1).
+    doc["charging"] = ((int)M5.Power.isCharging() != 0);
     doc["volume"] = cur_volume_pct;
     String json;
     serializeJson(doc, json);
