@@ -143,21 +143,37 @@ static size_t play_pos = 0;                   // bytes already fed to speaker
 static volatile bool server_done = false;     // server sent speak_done
 static volatile bool speaker_pending = false; // first audio arrived → switch to speaker
 static constexpr size_t PLAY_PIECE = 16000;   // feed speaker in ~0.5s pieces
+// Jitter buffer: how much PCM to accumulate before starting playback. The server
+// is cross-Pacific from the device, so streamed TTS arrives with jitter; without
+// a cushion the speaker queue underruns and audio stutters. ~1.5s @16k/16-bit.
+// Loaded from config at boot (LittleFS /config.json). ~2s @16k/16-bit default.
+static size_t PREBUFFER_BYTES = SAMPLE_RATE * 2 * 2;
 
 enum class AudioState { Idle, Listening, Waiting, Speaking };
 static AudioState audio_state = AudioState::Idle;
 static uint32_t waiting_since = 0;
 
 // === VAD (energy-based) auto-listen ===
-static constexpr uint32_t VAD_THRESH = 250;       // start threshold (begin speaking)
-static constexpr uint32_t VAD_KEEP_THRESH = 150;  // once talking, stay alive above this
-static constexpr int VAD_MIN_RUN = 3;             // consecutive loud chunks to confirm speech
+static constexpr uint32_t VAD_THRESH = 1000;      // start threshold (begin speaking)
+static constexpr uint32_t VAD_KEEP_THRESH = 1000; // silence = below this; >this keeps turn alive
+static int VAD_MIN_RUN = 3;                       // consecutive loud chunks to confirm speech (config)
 static constexpr int VAD_MIN_VOICED = 5;          // min total loud chunks (~0.5s) to actually send
-static constexpr uint32_t SILENCE_END_MS = 3500;  // stop after this much trailing silence
-static constexpr uint32_t NO_SPEECH_MS = 6000;    // give up if no speech after a wake
+static constexpr uint32_t SILENCE_END_MS = 2000;  // (unused in hold-to-talk) trailing silence
+static constexpr uint32_t RELEASE_HOLD_MS = 300;  // head released this long -> submit (debounce)
+static constexpr uint32_t MIN_HOLD_MS = 500;      // must hold at least this long to count (tap = ignore)
+static uint32_t NO_SPEECH_MS = 6000;              // give up if no speech after a wake (config)
 static constexpr uint32_t FOLLOWUP_NO_SPEECH_MS = 30000;  // post-answer follow-up window
+// Adaptive (relative-to-ambient) VAD: floor tracks ambient noise; speech = energy
+// rising clearly above the floor; submit after it falls back near the floor.
+// These are runtime-tunable (loaded from /config.json at boot).
+static float    VAD_RISE_FACTOR = 2.0f;  // speech start: energy > floor * this
+static float    VAD_KEEP_FACTOR = 1.4f;  // still talking: energy > floor * this
+static uint32_t VAD_MIN_MARGIN  = 150;   // and at least this much above floor
+static uint32_t VAD_END_SILENCE_MS = 700;   // low for this long after speech -> send
+static float noise_floor = 0;                      // adaptive ambient estimate (per turn)
 static uint32_t listen_start_ms = 0;
 static uint32_t last_voice_ms = 0;
+static uint32_t last_touch_ms = 0;  // hold-to-talk: last time head was touched
 static bool speech_detected = false;
 static int voiced_run = 0;
 static int voiced_total = 0;
@@ -604,9 +620,11 @@ static void start_listening(uint32_t now_ms, bool followup) {
     speech_detected = false;
     voiced_run = 0;
     voiced_total = 0;
+    noise_floor = 0;  // adaptive VAD: re-seed ambient each turn
     followup_listen = followup;
     listen_start_ms = now_ms;
     last_voice_ms = now_ms;
+    last_touch_ms = now_ms;  // hold-to-talk: touching at start
     last_activity_ms = now_ms;  // any new listening turn resets idle/sleep timer
     audio_state = AudioState::Listening;
     dbg("START");
@@ -616,7 +634,7 @@ static void finish_listening(bool send, uint32_t now_ms) {
     dbg(send ? "FIN_SEND" : "FIN_GIVEUP");
     while (M5.Mic.isRecording()) { delay(1); }
     M5.Mic.end();
-    if (send && voiced_total >= VAD_MIN_VOICED) {
+    if (send && rec_samples >= (size_t)(SAMPLE_RATE / 2)) {  // >=0.5s recorded -> send
         send_recording();
         audio_state = AudioState::Waiting;
         waiting_since = now_ms;
@@ -721,6 +739,18 @@ void setup() {
     M5.Display.setBrightness(128);
     M5.Display.fillScreen(BG_COLOR);
     configStore.begin();
+    // Apply runtime-tunable params from /config.json
+    {
+        VadConfig v = configStore.getVad();
+        VAD_RISE_FACTOR = v.rise_factor;
+        VAD_KEEP_FACTOR = v.keep_factor;
+        VAD_MIN_MARGIN = v.min_margin;
+        VAD_END_SILENCE_MS = v.end_silence_ms;
+        NO_SPEECH_MS = v.no_speech_ms;
+        VAD_MIN_RUN = v.min_run;
+        AudioConfig a = configStore.getAudio();
+        PREBUFFER_BYTES = (size_t)((uint64_t)SAMPLE_RATE * 2 * a.prebuffer_ms / 1000);
+    }
     head_touch_init();
     hw::init();
     draw_status_bar();
@@ -757,7 +787,7 @@ void setup() {
             Serial.printf("[WiFi] connecting to '%s'...\n", wifis[0].ssid.c_str());
             WiFi.begin(wifis[0].ssid.c_str(), wifis[0].password.c_str());
         } else {
-            WiFi.begin("松善", "66668888");
+            WiFi.begin("YOUR_WIFI_SSID", "YOUR_WIFI_PASSWORD");
         }
     }
     uint32_t t0 = millis();
@@ -790,29 +820,40 @@ void loop() {
 
     uint32_t now = millis();
 
-    // === Push-to-talk: hold head touch to record, release to send ===
-    // (screen touch intentionally not used as a trigger for now)
+    // === Tap to talk: tap head once to start listening, tap again to send. ===
+    // (Energy VAD is unreliable in noisy rooms, so the turn is ended by a tap.
+    // screen touch intentionally not used as a trigger.)
     bool talk = head_touched();
+    static bool prev_talk = false;
+    bool tap = talk && !prev_talk;        // rising edge = a fresh tap
+    prev_talk = talk;
+    bool started_now = false;
+    static bool stop_req = false;
 
-    // Wake from sleep on head touch → start listening
-    if (asleep && talk) {
+    // Wake from sleep on tap → start listening
+    if (asleep && tap) {
         asleep = false;
         M5.Display.setBrightness(AWAKE_BRIGHTNESS);
-        if (ws_state >= 1) start_listening(now, false);
+        if (ws_state >= 1) { start_listening(now, false); started_now = true; }
         last_activity_ms = now;
         draw_status_bar();
     }
     if (talk || audio_state != AudioState::Idle) {
         last_activity_ms = now;
     }
-    // Awake + idle + head touch → start listening
-    if (!asleep && audio_state == AudioState::Idle && talk && ws_state >= 1) {
+    // Awake + idle + tap → start listening
+    if (!asleep && audio_state == AudioState::Idle && tap && ws_state >= 1) {
         start_listening(now, false);
+        started_now = true;
         draw_status_bar();
     }
+    if (started_now) stop_req = false;
 
-    // Listening: record in chunks, run energy VAD, auto-stop on silence
+    // Listening: keep recording until a second tap (or max length). A latch
+    // catches the transient tap edge even while the mic chunk is in flight.
     if (audio_state == AudioState::Listening) {
+        if (talk) last_touch_ms = now;
+        if (tap && !started_now && (now - listen_start_ms > MIN_HOLD_MS)) stop_req = true;
         static uint32_t last_dbg = 0;
         if (now - last_dbg > 200) { last_dbg = now; dbg("L"); }
         if (!M5.Mic.isRecording()) {
@@ -824,30 +865,36 @@ void loop() {
                     sum += (v < 0) ? -v : v;
                 }
                 vad_level = n ? (uint32_t)(sum / (int64_t)n) : 0;
-                if (vad_level > VAD_THRESH) {
+                chunk_pending = false;
+
+                // --- adaptive VAD: thresholds relative to the ambient floor ---
+                if (noise_floor <= 0) noise_floor = (float)vad_level;  // seed on 1st chunk
+                float rise = noise_floor * VAD_RISE_FACTOR + VAD_MIN_MARGIN;
+                float keep = noise_floor * VAD_KEEP_FACTOR + (VAD_MIN_MARGIN / 2);
+                if (!speech_detected) {
+                    // track ambient while waiting: fall fast to quiet, rise slowly
+                    if ((float)vad_level < noise_floor) noise_floor = (float)vad_level;
+                    else noise_floor += ((float)vad_level - noise_floor) * 0.05f;
+                }
+                if ((float)vad_level > rise) {
                     voiced_run++;
-                    voiced_total++;
                     last_voice_ms = now;
                     if (voiced_run >= VAD_MIN_RUN) speech_detected = true;
                 } else {
                     voiced_run = 0;
-                    // once talking, keep the turn alive on softer voice so we
-                    // don't cut off quiet syllables / brief pauses
-                    if (speech_detected && vad_level > VAD_KEEP_THRESH) {
-                        last_voice_ms = now;
-                    }
+                    if (speech_detected && (float)vad_level > keep) last_voice_ms = now;
                 }
-                chunk_pending = false;
             }
             bool too_long = rec_samples + 1600 > REC_MAX_SAMPLES;
-            bool ended = speech_detected && (now - last_voice_ms > SILENCE_END_MS);
-            uint32_t no_speech_limit = followup_listen ? FOLLOWUP_NO_SPEECH_MS : NO_SPEECH_MS;
-            bool give_up = !speech_detected && (now - listen_start_ms > no_speech_limit);
-            if (ended || too_long) {
+            // submit after speech falls back to the floor for VAD_END_SILENCE_MS
+            bool ended = speech_detected && (now - last_voice_ms > VAD_END_SILENCE_MS);
+            bool give_up = !speech_detected && (now - listen_start_ms > NO_SPEECH_MS);
+            if (stop_req || ended || too_long) {
+                stop_req = false;
                 finish_listening(true, now);
                 draw_status_bar();
             } else if (give_up) {
-                finish_listening(false, now);
+                finish_listening(false, now);  // woke but nobody spoke -> sleep
                 draw_status_bar();
             } else {
                 chunk_start = rec_samples;
@@ -870,10 +917,14 @@ void loop() {
         draw_status_bar();
     }
     if (audio_state == AudioState::Speaking) {
-        // feed accumulated PCM to the speaker queue in pieces
-        while (play_pos < play_bytes) {
+        // Jitter buffer: don't start playback until a cushion is buffered (or the
+        // whole reply arrived). Once started (play_pos>0) keep feeding as data comes.
+        bool ready = (play_pos > 0) || server_done || (play_bytes >= PREBUFFER_BYTES);
+        // feed accumulated PCM to the speaker queue; feed eagerly (whatever is
+        // available) so the speaker queue stays full — the prebuffered play_buf
+        // is the cushion, and withholding data here just causes underrun/stutter.
+        while (ready && play_pos < play_bytes) {
             size_t avail = play_bytes - play_pos;
-            if (avail < PLAY_PIECE && !server_done) break;  // wait for more (avoid choppy)
             size_t piece = (avail < PLAY_PIECE ? avail : PLAY_PIECE) & ~((size_t)1);
             if (piece == 0) break;
             if (!M5.Speaker.playRaw((const int16_t*)(play_buf + play_pos), piece / 2,
@@ -887,8 +938,8 @@ void loop() {
         if (server_done && play_pos >= play_bytes && !M5.Speaker.isPlaying()) {
             dbg("SPKDONE");
             last_activity_ms = now;
-            if (ws_state >= 1) start_listening(now, true);
-            else go_to_sleep();
+            // hold-to-talk: answer done -> sleep; touch & hold to ask again
+            go_to_sleep();
             draw_status_bar();
         }
     }

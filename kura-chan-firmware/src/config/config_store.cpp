@@ -1,130 +1,139 @@
 #include "config_store.h"
+#include <LittleFS.h>
+#include <ArduinoJson.h>
 
 ConfigStore configStore;
 
+static const char* CFG_PATH = "/config.json";
+
+void ConfigStore::loadDefaults_() {
+    // Placeholders only — NO real credentials baked into firmware. Real values
+    // come from /config.json (uploadfs, or future web UI). A fresh device with
+    // no config.json boots with these and simply won't connect until configured.
+    wifi_ = { {"YOUR_WIFI_SSID", "YOUR_WIFI_PASSWORD"} };
+    srvHost_ = "YOUR_SERVER_HOST";
+    srvPort_ = 8866;
+    srvPath_ = "/ws/device";
+    apiKey_ = "dev_key_001";
+    deviceId_ = "KURA_CHAN_001";
+    vad_ = {2.0f, 1.4f, 150, 700, 6000, 3};
+    audio_ = {2000};
+}
+
 void ConfigStore::begin() {
-    prefs_.begin("kura", false);
-
-    // Write defaults on first boot (or after factory reset)
-    if (!prefs_.isKey("v3")) {
-        prefs_.clear();
-        Serial.println("[Config] Initializing config...");
-        prefs_.putBool("v3", true);
-        prefs_.putString("srv_host", "54.187.154.83");
-        prefs_.putUShort("srv_port", 8866);
-        prefs_.putString("srv_path", "/ws/device");
-        prefs_.putString("api_key", "dev_key_001");
-        prefs_.putString("device_id", "KURA_CHAN_001");
-        prefs_.putString("ws0", "松善");
-        prefs_.putString("wp0", "66668888");
-        prefs_.putUChar("wifi_cnt", 1);
+    loadDefaults_();
+    if (!LittleFS.begin(true)) {  // format on first use if needed
+        Serial.println("[Config] LittleFS mount failed; using built-in defaults");
+        return;
     }
-
-    // Config migration by revision. NVS keys must be <=15 chars, so we use a
-    // single short "cfg_rev" counter instead of one boolean key per migration
-    // (those long keys silently failed with KEY_TOO_LONG and re-ran every boot).
-    // To re-point WiFi/server on already-provisioned devices: update the values
-    // below and bump CFG_REV.
-    constexpr uint8_t CFG_REV = 2;
-    if (prefs_.getUChar("cfg_rev", 0) < CFG_REV) {
-        prefs_.putString("ws0", "松善");
-        prefs_.putString("wp0", "66668888");
-        if (prefs_.getUChar("wifi_cnt", 0) < 1) {
-            prefs_.putUChar("wifi_cnt", 1);
-        }
-        prefs_.putString("srv_host", "54.187.154.83");
-        prefs_.putUShort("srv_port", 8866);
-        prefs_.putUChar("cfg_rev", CFG_REV);
-        Serial.println("[Config] migrated rev2: WiFi=松善 srv=54.187.154.83:8866");
+    if (LittleFS.exists(CFG_PATH)) {
+        if (load_()) Serial.println("[Config] loaded /config.json");
+        else Serial.println("[Config] /config.json invalid; using defaults");
+    } else {
+        Serial.println("[Config] no /config.json; writing defaults");
+        save_();
     }
+    dump();
 }
 
-std::vector<WifiEntry> ConfigStore::getWifiList() {
-    std::vector<WifiEntry> list;
-    uint8_t count = prefs_.getUChar("wifi_cnt", 0);
-    for (uint8_t i = 0; i < count && i < 5; i++) {
-        String ssid = prefs_.getString(("ws" + String(i)).c_str(), "");
-        String pass = prefs_.getString(("wp" + String(i)).c_str(), "");
-        if (ssid.length() > 0) {
-            list.push_back({ssid, pass});
+bool ConfigStore::load_() {
+    File f = LittleFS.open(CFG_PATH, "r");
+    if (!f) return false;
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, f);
+    f.close();
+    if (err) return false;
+
+    srvHost_ = doc["server"]["host"] | srvHost_;
+    srvPort_ = doc["server"]["port"] | srvPort_;
+    srvPath_ = doc["server"]["path"] | srvPath_;
+    apiKey_ = doc["auth"]["api_key"] | apiKey_;
+    deviceId_ = doc["auth"]["device_id"] | deviceId_;
+
+    if (doc["wifi"].is<JsonArray>()) {
+        std::vector<WifiEntry> list;
+        for (JsonObject w : doc["wifi"].as<JsonArray>()) {
+            String ssid = w["ssid"] | "";
+            if (ssid.length() > 0) list.push_back({ssid, String(w["pass"] | "")});
         }
+        if (!list.empty()) wifi_ = list;  // keep defaults if the array is empty
     }
-    return list;
+
+    vad_.rise_factor = doc["vad"]["rise_factor"] | vad_.rise_factor;
+    vad_.keep_factor = doc["vad"]["keep_factor"] | vad_.keep_factor;
+    vad_.min_margin = doc["vad"]["min_margin"] | vad_.min_margin;
+    vad_.end_silence_ms = doc["vad"]["end_silence_ms"] | vad_.end_silence_ms;
+    vad_.no_speech_ms = doc["vad"]["no_speech_ms"] | vad_.no_speech_ms;
+    vad_.min_run = doc["vad"]["min_run"] | vad_.min_run;
+
+    audio_.prebuffer_ms = doc["audio"]["prebuffer_ms"] | audio_.prebuffer_ms;
+    return true;
 }
+
+bool ConfigStore::save_() {
+    JsonDocument doc;
+    JsonArray wa = doc["wifi"].to<JsonArray>();
+    for (auto& w : wifi_) {
+        JsonObject o = wa.add<JsonObject>();
+        o["ssid"] = w.ssid;
+        o["pass"] = w.password;
+    }
+    doc["server"]["host"] = srvHost_;
+    doc["server"]["port"] = srvPort_;
+    doc["server"]["path"] = srvPath_;
+    doc["auth"]["api_key"] = apiKey_;
+    doc["auth"]["device_id"] = deviceId_;
+    doc["vad"]["rise_factor"] = vad_.rise_factor;
+    doc["vad"]["keep_factor"] = vad_.keep_factor;
+    doc["vad"]["min_margin"] = vad_.min_margin;
+    doc["vad"]["end_silence_ms"] = vad_.end_silence_ms;
+    doc["vad"]["no_speech_ms"] = vad_.no_speech_ms;
+    doc["vad"]["min_run"] = vad_.min_run;
+    doc["audio"]["prebuffer_ms"] = audio_.prebuffer_ms;
+
+    File f = LittleFS.open(CFG_PATH, "w");
+    if (!f) {
+        Serial.println("[Config] save failed: cannot open for write");
+        return false;
+    }
+    serializeJsonPretty(doc, f);
+    f.close();
+    return true;
+}
+
+std::vector<WifiEntry> ConfigStore::getWifiList() { return wifi_; }
 
 void ConfigStore::addWifi(const String& ssid, const String& password) {
-    uint8_t count = prefs_.getUChar("wifi_cnt", 0);
-    if (count >= 5) {
-        Serial.println("[Config] Max 5 WiFi networks, removing oldest");
-        // Shift all down
-        for (uint8_t i = 0; i < 4; i++) {
-            String s = prefs_.getString(("ws" + String(i + 1)).c_str(), "");
-            String p = prefs_.getString(("wp" + String(i + 1)).c_str(), "");
-            prefs_.putString(("ws" + String(i)).c_str(), s);
-            prefs_.putString(("wp" + String(i)).c_str(), p);
-        }
-        count = 4;
-    }
-    prefs_.putString(("ws" + String(count)).c_str(), ssid);
-    prefs_.putString(("wp" + String(count)).c_str(), password);
-    prefs_.putUChar("wifi_cnt", count + 1);
-    Serial.printf("[Config] WiFi added: %s (%d total)\n", ssid.c_str(), count + 1);
+    if (wifi_.size() >= 5) wifi_.erase(wifi_.begin());
+    wifi_.push_back({ssid, password});
+    save_();
+    Serial.printf("[Config] WiFi added: %s (%d total)\n", ssid.c_str(), (int)wifi_.size());
 }
 
-void ConfigStore::clearWifi() {
-    prefs_.putUChar("wifi_cnt", 0);
-    Serial.println("[Config] WiFi list cleared");
-}
+void ConfigStore::clearWifi() { wifi_.clear(); save_(); Serial.println("[Config] WiFi cleared"); }
 
-String ConfigStore::getServerHost() {
-    return prefs_.getString("srv_host", "192.168.1.100");
-}
+String ConfigStore::getServerHost() { return srvHost_; }
+uint16_t ConfigStore::getServerPort() { return srvPort_; }
+String ConfigStore::getServerPath() { return srvPath_; }
+String ConfigStore::getApiKey() { return apiKey_; }
+String ConfigStore::getDeviceId() { return deviceId_; }
+VadConfig ConfigStore::getVad() { return vad_; }
+AudioConfig ConfigStore::getAudio() { return audio_; }
 
-uint16_t ConfigStore::getServerPort() {
-    return prefs_.getUShort("srv_port", 8080);
-}
-
-String ConfigStore::getServerPath() {
-    return prefs_.getString("srv_path", "/ws/device");
-}
-
-String ConfigStore::getApiKey() {
-    return prefs_.getString("api_key", "dev_key_001");
-}
-
-String ConfigStore::getDeviceId() {
-    return prefs_.getString("device_id", "KURA_CHAN_001");
-}
-
-void ConfigStore::setServerHost(const String& host) {
-    prefs_.putString("srv_host", host);
-    Serial.printf("[Config] Server host: %s\n", host.c_str());
-}
-
-void ConfigStore::setServerPort(uint16_t port) {
-    prefs_.putUShort("srv_port", port);
-    Serial.printf("[Config] Server port: %d\n", port);
-}
-
-void ConfigStore::setApiKey(const String& key) {
-    prefs_.putString("api_key", key);
-}
-
-void ConfigStore::setDeviceId(const String& id) {
-    prefs_.putString("device_id", id);
-}
+void ConfigStore::setServerHost(const String& host) { srvHost_ = host; save_(); Serial.printf("[Config] Server host: %s\n", host.c_str()); }
+void ConfigStore::setServerPort(uint16_t port) { srvPort_ = port; save_(); Serial.printf("[Config] Server port: %d\n", port); }
+void ConfigStore::setApiKey(const String& key) { apiKey_ = key; save_(); }
+void ConfigStore::setDeviceId(const String& id) { deviceId_ = id; save_(); }
 
 void ConfigStore::dump() {
-    Serial.println("=== Kura-chan Config ===");
-    Serial.printf("  Server: %s:%d%s\n",
-        getServerHost().c_str(), getServerPort(), getServerPath().c_str());
-    Serial.printf("  API Key: %s\n", getApiKey().c_str());
-    Serial.printf("  Device ID: %s\n", getDeviceId().c_str());
-
-    auto wifis = getWifiList();
-    Serial.printf("  WiFi networks (%d):\n", wifis.size());
-    for (auto& w : wifis) {
-        Serial.printf("    - %s\n", w.ssid.c_str());
-    }
-    Serial.println("=======================");
+    Serial.println("=== Kura-chan Config (LittleFS /config.json) ===");
+    Serial.printf("  Server: %s:%d%s\n", srvHost_.c_str(), srvPort_, srvPath_.c_str());
+    Serial.printf("  Device: %s\n", deviceId_.c_str());
+    Serial.printf("  WiFi (%d):\n", (int)wifi_.size());
+    for (auto& w : wifi_) Serial.printf("    - %s\n", w.ssid.c_str());
+    Serial.printf("  VAD: rise=%.2f keep=%.2f margin=%lu end=%lums nospeech=%lums run=%d\n",
+                  vad_.rise_factor, vad_.keep_factor, (unsigned long)vad_.min_margin,
+                  (unsigned long)vad_.end_silence_ms, (unsigned long)vad_.no_speech_ms, vad_.min_run);
+    Serial.printf("  Audio: prebuffer=%lums\n", (unsigned long)audio_.prebuffer_ms);
+    Serial.println("================================================");
 }

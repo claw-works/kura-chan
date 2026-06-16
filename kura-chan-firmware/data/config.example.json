@@ -1,0 +1,26 @@
+{
+  "_comment": "Template. Copy to config.json (gitignored), fill real values, then `pio run -t uploadfs`. Do NOT put real wifi passwords / server in this committed file.",
+  "wifi": [
+    { "ssid": "YOUR_WIFI_SSID", "pass": "YOUR_WIFI_PASSWORD" }
+  ],
+  "server": {
+    "host": "YOUR_SERVER_HOST",
+    "port": 8866,
+    "path": "/ws/device"
+  },
+  "auth": {
+    "api_key": "dev_key_001",
+    "device_id": "KURA_CHAN_001"
+  },
+  "vad": {
+    "rise_factor": 2.0,
+    "keep_factor": 1.4,
+    "min_margin": 150,
+    "end_silence_ms": 700,
+    "no_speech_ms": 6000,
+    "min_run": 3
+  },
+  "audio": {
+    "prebuffer_ms": 2000
+  }
+}
