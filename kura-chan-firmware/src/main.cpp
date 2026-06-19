@@ -10,6 +10,11 @@
 #include "config/config_store.h"
 #include "SCSCL.h"
 #include <math.h>
+#include <Avatar.h>
+#include <faces/FaceTemplates.hpp>
+
+// m5stack-avatar runs its own render task and owns the LCD once init()'d.
+static m5avatar::Avatar avatar;
 
 // ===================== Hardware: servo (SCS bus) + RGB LED (PY32) =====================
 namespace hw {
@@ -242,6 +247,9 @@ static constexpr uint32_t GESTURE_MS = 1300;
 static int cur_volume_pct = 78;  // M5.Speaker volume ~200/255
 
 void draw_status_bar() {
+    // No-op: the avatar render task owns the whole LCD now. Status/IP/WS/VAD
+    // overlay can be re-added later via avatar.addTask() or a speech balloon.
+    return;
     auto& lcd = M5.Display;
     lcd.fillRect(0, 0, SCREEN_W, 16, 0x000000);
     lcd.setTextColor(0x888888);
@@ -365,74 +373,42 @@ enum class FaceMode { Sleep, Idle, Listen, Think, Speak };
 static FaceMode face_mode = FaceMode::Idle;
 static FaceMode last_face = (FaceMode)-1;
 
+static m5avatar::Expression emotion_to_expression() {
+    if (current_emotion == "happy" || current_emotion == "love") return m5avatar::Expression::Happy;
+    if (current_emotion == "sad") return m5avatar::Expression::Sad;
+    if (current_emotion == "angry") return m5avatar::Expression::Angry;
+    if (current_emotion == "confused" || current_emotion == "surprised") return m5avatar::Expression::Doubt;
+    return m5avatar::Expression::Neutral;
+}
+
+// Drive the m5stack-avatar from system state. Keeps the original name so all
+// existing call sites work unchanged. The avatar's own task handles blink/breath.
 static void update_face(uint32_t now) {
-    // derive desired face from system state
-    FaceMode want;
+    (void)now;
+    static m5avatar::Expression lastExp = m5avatar::Expression::Neutral;
+    static bool wasAsleep = false;
+    static float lastMouth = -1.0f;
+
+    if (asleep != wasAsleep) {
+        wasAsleep = asleep;
+        M5.Display.setBrightness(asleep ? SLEEP_BRIGHTNESS : AWAKE_BRIGHTNESS);
+    }
+
+    m5avatar::Expression exp;
     if (asleep) {
-        want = FaceMode::Sleep;
+        exp = m5avatar::Expression::Sleepy;
     } else {
         switch (audio_state) {
-            case AudioState::Listening: want = FaceMode::Listen; break;
-            case AudioState::Waiting:   want = FaceMode::Think; break;
-            case AudioState::Speaking: {
-                // honest mouth: animate only while audio is actually playing;
-                // during inter-sentence gaps show "thinking"
-                static uint32_t last_play_ms = 0;
-                if (M5.Speaker.isPlaying()) last_play_ms = now;
-                want = (now - last_play_ms < 300) ? FaceMode::Speak : FaceMode::Think;
-                break;
-            }
-            default: want = FaceMode::Idle; break;
+            case AudioState::Listening: exp = m5avatar::Expression::Neutral; break;
+            case AudioState::Waiting:   exp = m5avatar::Expression::Doubt;   break;  // thinking
+            default:                    exp = emotion_to_expression();       break;  // idle/speaking -> mood
         }
     }
+    if (exp != lastExp) { avatar.setExpression(exp); lastExp = exp; }
 
-    bool changed = (want != last_face);
-    face_mode = want;
-    if (changed) {
-        last_face = want;
-        switch (want) {
-            case FaceMode::Sleep:  face_sleep(); break;
-            case FaceMode::Idle:   face_idle(false); break;
-            case FaceMode::Listen: face_listen(); break;
-            case FaceMode::Think:  face_think(); break;
-            case FaceMode::Speak:  face_speak(); break;
-        }
-        return;
-    }
-
-    // per-state animation
-    if (want == FaceMode::Idle) {
-        if (!is_blinking && now - last_blink_ms > blink_interval_ms) {
-            is_blinking = true; blink_start_ms = now; clear_face(); draw_blink_eyes(); draw_cheeks(); mouth_smile();
-        }
-        if (is_blinking && now - blink_start_ms > BLINK_DURATION_MS) {
-            is_blinking = false; last_blink_ms = now; blink_interval_ms = 2000 + (esp_random() % 3000);
-            clear_face(); draw_eyes(4, 2, false, false); draw_cheeks(); mouth_smile();
-        }
-    } else if (want == FaceMode::Think) {
-        static uint32_t t = 0; static int phase = 0;
-        if (now - t > 350) { t = now; phase = (phase + 1) % 4; draw_think_dots(phase); }
-        // wandering eyes (pondering)
-        static uint32_t te = 0; static int ei = 0;
-        if (now - te > 550) {
-            te = now;
-            static const int8_t ex[] = {9, -9, 9, -9, 0, 8, -8};
-            static const int8_t ey[] = {-7, -7, 3, 3, -8, -2, -2};
-            ei = (ei + 1) % 7;
-            M5.Display.fillRect(0, 82, SCREEN_W, 70, BG_COLOR);
-            draw_eyes(ex[ei], ey[ei], false, false);
-            draw_cheeks();
-        }
-    } else if (want == FaceMode::Speak) {
-        static uint32_t t = 0; static int idx = 0;
-        if (now - t > 120) {
-            t = now;
-            static const int open[] = {3, 10, 16, 10, 4, 13, 7};
-            idx = (idx + 1) % 7;
-            clear_mouth();
-            mouth_talk(open[idx]);
-        }
-    }
+    // lip-sync: open mouth only while audio is actually playing
+    float mouth = (audio_state == AudioState::Speaking && M5.Speaker.isPlaying()) ? 0.7f : 0.0f;
+    if (mouth != lastMouth) { avatar.setMouthOpenRatio(mouth); lastMouth = mouth; }
 }
 
 // === Hardware (LED + servo) driven by state + emotion ===
@@ -635,9 +611,14 @@ static void finish_listening(bool send, uint32_t now_ms) {
     while (M5.Mic.isRecording()) { delay(1); }
     M5.Mic.end();
     if (send && rec_samples >= (size_t)(SAMPLE_RATE / 2)) {  // >=0.5s recorded -> send
-        send_recording();
+        // Switch to THINK and render it *before* uploading. send_recording()
+        // blocks while it pushes audio to the (remote) server, so if we flipped
+        // state after, the UI would sit on LIS during the whole upload.
         audio_state = AudioState::Waiting;
         waiting_since = now_ms;
+        update_face(now_ms);
+        draw_status_bar();
+        send_recording();
     } else {
         M5.Speaker.begin();
         M5.Speaker.setVolume(200);
@@ -731,13 +712,30 @@ void webSocketEvent(WStype_t type, uint8_t* payload, size_t length) {
     }
 }
 
+static void splash_screen() {
+    auto& lcd = M5.Display;
+    lcd.fillScreen(BG_COLOR);
+    lcd.setTextDatum(textdatum_t::middle_center);
+    lcd.setTextColor(0x9999BB);
+    lcd.setFont(&fonts::Font4);
+    lcd.setTextSize(1);
+    lcd.drawString("hello", SCREEN_W / 2, SCREEN_H / 2 - 34);
+    lcd.setTextColor(0xFFD24A);
+    lcd.setFont(&fonts::Font4);
+    lcd.setTextSize(2);
+    lcd.drawString("kura", SCREEN_W / 2, SCREEN_H / 2 + 18);
+    lcd.setTextDatum(textdatum_t::top_left);  // restore default for other drawing
+    lcd.setTextSize(1);
+}
+
 void setup() {
     auto cfg = M5.config();
     M5.begin(cfg);
     Serial.begin(115200);
     M5.Display.setRotation(1);
     M5.Display.setBrightness(128);
-    M5.Display.fillScreen(BG_COLOR);
+    splash_screen();
+    delay(1800);
     configStore.begin();
     // Apply runtime-tunable params from /config.json
     {
@@ -753,9 +751,8 @@ void setup() {
     }
     head_touch_init();
     hw::init();
-    draw_status_bar();
-    face_idle(false);
-    last_face = FaceMode::Idle;
+    avatar.init(8);   // start avatar render task (owns the LCD); 8-bit color
+    avatar.setFace(new m5avatar::DoggyFace());
 
     // Allocate audio buffers in PSRAM
     rec_buf = (int16_t*)heap_caps_malloc(REC_MAX_SAMPLES * sizeof(int16_t), MALLOC_CAP_SPIRAM);

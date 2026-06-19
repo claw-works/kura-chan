@@ -1,9 +1,14 @@
+mod agent_loop;
+mod api;
 mod auth;
 mod config;
 mod error;
 mod harness;
+mod registry;
 mod router;
 mod speech;
+mod tasks;
+mod workflows;
 mod ws;
 
 use std::sync::Arc;
@@ -37,13 +42,27 @@ async fn main() {
     let stt = build_stt(&config);
     let tts = build_tts(&config);
 
+    let registry = std::sync::Arc::new(registry::SessionRegistry::new());
+    let task_store = std::sync::Arc::new(tasks::TaskStore::load(
+        std::path::PathBuf::from("tasks.json"),
+    ));
+    let workflow_store = std::sync::Arc::new(workflows::WorkflowStore::load(
+        std::path::PathBuf::from("workflows.json"),
+    ));
+
     let state = Arc::new(AppState {
         config: config.clone(),
         harness,
         stt,
         tts,
         canned: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+        registry,
+        task_store,
+        workflow_store,
     });
+
+    // Agent loop: slow heartbeat + scheduled-task scheduler (proactive push).
+    tokio::spawn(agent_loop::run(state.clone()));
 
     let app = router::create_router(state);
 

@@ -28,6 +28,12 @@ pub struct AppState {
     /// Cache of synthesized canned phrases (phrase text -> PCM), so common
     /// replies like "没听清" are only synthesized once.
     pub canned: tokio::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>,
+    /// Connected devices, for proactive push from background tasks.
+    pub registry: Arc<crate::registry::SessionRegistry>,
+    /// User-defined scheduled tasks (file-backed).
+    pub task_store: Arc<crate::tasks::TaskStore>,
+    /// Reusable request templates run through the harness (file-backed).
+    pub workflow_store: Arc<crate::workflows::WorkflowStore>,
 }
 
 /// Phrase played when speech couldn't be transcribed.
@@ -68,6 +74,27 @@ pub async fn ws_upgrade(
 
 async fn handle_socket(socket: WebSocket, device_id: String, state: Arc<AppState>) {
     let (mut sender, mut receiver) = socket.split();
+
+    // Outbound channel + writer task. The receive loop and background tasks
+    // (heartbeat/scheduler, via the registry) both push events through `tx`;
+    // the writer owns the sink and serializes them onto the socket.
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<SessionEvent>();
+    state.registry.register(&device_id, tx.clone());
+    let writer = tokio::spawn(async move {
+        while let Some(ev) = rx.recv().await {
+            let msg = match ev {
+                SessionEvent::SendJson(m) => match serde_json::to_string(&m) {
+                    Ok(j) => Message::Text(j.into()),
+                    Err(_) => continue,
+                },
+                SessionEvent::SendAudio(d) => Message::Binary(d.into()),
+            };
+            if sender.send(msg).await.is_err() {
+                break;
+            }
+        }
+    });
+
     let mut session = Session::new(device_id.clone(), state.config.clone());
 
     while let Some(msg) = receiver.next().await {
@@ -94,7 +121,7 @@ async fn handle_socket(socket: WebSocket, device_id: String, state: Arc<AppState
                     }
                 };
                 for event in events {
-                    send_event(&mut sender, event).await;
+                    send_event(&tx, event).await;
                 }
             }
             Message::Binary(data) => {
@@ -107,7 +134,7 @@ async fn handle_socket(socket: WebSocket, device_id: String, state: Arc<AppState
                 };
 
                 for event in frame_events {
-                    send_event(&mut sender, event).await;
+                    send_event(&tx, event).await;
                 }
 
                 // If session transitioned to Thinking, run the full pipeline
@@ -123,7 +150,7 @@ async fn handle_socket(socket: WebSocket, device_id: String, state: Arc<AppState
                         }
                     };
                     send_event(
-                        &mut sender,
+                        &tx,
                         SessionEvent::SendJson(ServerMessage::Stt(SttResult {
                             text: stt_text.clone(),
                             r#final: true,
@@ -135,7 +162,7 @@ async fn handle_socket(socket: WebSocket, device_id: String, state: Arc<AppState
                     if stt_text.trim().is_empty() {
                         tracing::info!("Empty STT, playing canned phrase");
                         let audio = state.canned_audio(PHRASE_NOT_HEARD).await;
-                        speak_phrase(&mut sender, &mut session, PHRASE_NOT_HEARD, "confused", &audio).await;
+                        speak_phrase(&tx, &mut session, PHRASE_NOT_HEARD, "confused", &audio).await;
                         continue;
                     }
 
@@ -150,7 +177,7 @@ async fn handle_socket(socket: WebSocket, device_id: String, state: Arc<AppState
                         Err(e) => {
                             tracing::error!(error = ?e, "Harness invoke failed");
                             let audio = state.canned_audio(PHRASE_ERROR).await;
-                            speak_phrase(&mut sender, &mut session, PHRASE_ERROR, "sad", &audio).await;
+                            speak_phrase(&tx, &mut session, PHRASE_ERROR, "sad", &audio).await;
                             continue;
                         }
                     };
@@ -160,10 +187,11 @@ async fn handle_socket(socket: WebSocket, device_id: String, state: Arc<AppState
                         emotion: "happy".into(),
                         audio_follows: true,
                     }) {
-                        send_event(&mut sender, ev).await;
+                        send_event(&tx, ev).await;
                     }
 
                     let mut buf = String::new();
+                    let mut new_tasks: Vec<crate::tasks::ScheduledTask> = Vec::new();
                     let mut first = true;
                     let mut sent_any = false;
                     loop {
@@ -171,8 +199,8 @@ async fn handle_socket(socket: WebSocket, device_id: String, state: Arc<AppState
                             Ok(Some(event)) => {
                                 if let Some(t) = extract_text_delta(&event) {
                                     buf.push_str(&t);
-                                    for msg in extract_tags(&mut buf) {
-                                        send_event(&mut sender, SessionEvent::SendJson(msg)).await;
+                                    for msg in extract_tags(&mut buf, &device_id, &mut new_tasks) {
+                                        send_event(&tx, SessionEvent::SendJson(msg)).await;
                                     }
                                     while let Some(cut) = split_sentence(&buf) {
                                         let seg: String = buf.drain(..cut).collect();
@@ -181,7 +209,7 @@ async fn handle_socket(socket: WebSocket, device_id: String, state: Arc<AppState
                                             let audio =
                                                 state.tts.synthesize(seg).await.unwrap_or_default();
                                             if !audio.is_empty() {
-                                                send_audio_stream(&mut sender, &audio, first).await;
+                                                send_audio_stream(&tx, &audio, first).await;
                                                 first = false;
                                                 sent_any = true;
                                             }
@@ -197,14 +225,14 @@ async fn handle_socket(socket: WebSocket, device_id: String, state: Arc<AppState
                         }
                     }
                     // flush trailing text
-                    for msg in extract_tags(&mut buf) {
-                        send_event(&mut sender, SessionEvent::SendJson(msg)).await;
+                    for msg in extract_tags(&mut buf, &device_id, &mut new_tasks) {
+                        send_event(&tx, SessionEvent::SendJson(msg)).await;
                     }
                     let rest = buf.trim().to_string();
                     if !rest.is_empty() && !rest.contains("[NOISE]") {
                         let audio = state.tts.synthesize(&rest).await.unwrap_or_default();
                         if !audio.is_empty() {
-                            send_audio_stream(&mut sender, &audio, first).await;
+                            send_audio_stream(&tx, &audio, first).await;
                             first = false;
                             sent_any = true;
                         }
@@ -213,23 +241,30 @@ async fn handle_socket(socket: WebSocket, device_id: String, state: Arc<AppState
                     if !sent_any {
                         tracing::info!("No speakable reply, using canned phrase");
                         let audio = state.canned_audio(PHRASE_NOT_HEARD).await;
-                        send_audio_stream(&mut sender, &audio, first).await;
+                        send_audio_stream(&tx, &audio, first).await;
                     }
-                    send_event(&mut sender, SessionEvent::SendJson(ServerMessage::SpeakDone))
+                    // Persist any tasks the agent decided to create this turn.
+                    for t in new_tasks {
+                        let id = t.id.clone();
+                        state.task_store.add(t);
+                        tracing::info!(task = %id, device = %device_id, "task created via voice");
+                    }
+                    send_event(&tx, SessionEvent::SendJson(ServerMessage::SpeakDone))
                         .await;
                     for ev in session.finish_speaking() {
-                        send_event(&mut sender, ev).await;
+                        send_event(&tx, ev).await;
                     }
                 }
             }
-            Message::Ping(data) => {
-                let _ = sender.send(Message::Pong(data)).await;
-            }
+            Message::Ping(_) => {}
             Message::Close(_) => break,
             _ => {}
         }
     }
 
+    state.registry.unregister(&device_id);
+    drop(tx);
+    let _ = writer.await;
     tracing::info!(device_id = %device_id, "Device disconnected");
 }
 
@@ -237,7 +272,7 @@ async fn handle_socket(socket: WebSocket, device_id: String, state: Arc<AppState
 /// of a reply (device resets its playback buffer and switches to the speaker).
 /// No END flag is used; the reply ends with a SpeakDone control message.
 async fn send_audio_stream(
-    sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    tx: &crate::registry::DeviceTx,
     audio: &[u8],
     start: bool,
 ) {
@@ -254,7 +289,7 @@ async fn send_audio_stream(
             flags,
             payload: audio[off..end].to_vec(),
         };
-        send_event(sender, SessionEvent::SendAudio(frame.encode())).await;
+        send_event(tx, SessionEvent::SendAudio(frame.encode())).await;
         off = end;
     }
 }
@@ -262,7 +297,11 @@ async fn send_audio_stream(
 /// Remove complete `[do:...]` / `[mood:...]` tags from `buf`, returning the
 /// control/emotion messages to send. Unrecognized tags (e.g. `[NOISE]`) and any
 /// unclosed trailing `[...` are left in place so TTS handling stays correct.
-fn extract_tags(buf: &mut String) -> Vec<ServerMessage> {
+fn extract_tags(
+    buf: &mut String,
+    device_id: &str,
+    tasks: &mut Vec<crate::tasks::ScheduledTask>,
+) -> Vec<ServerMessage> {
     let mut out = Vec::new();
     let mut search = 0;
     loop {
@@ -285,11 +324,91 @@ fn extract_tags(buf: &mut String) -> Vec<ServerMessage> {
             }));
             buf.replace_range(open..close + 1, "");
             search = open;
+        } else if let Some(rest) = inner.strip_prefix("task:") {
+            if let Some(t) = parse_task(rest, device_id) {
+                tasks.push(t);
+            }
+            buf.replace_range(open..close + 1, "");
+            search = open;
         } else {
             search = close + 1; // leave unrecognized tag, skip past it
         }
     }
     out
+}
+
+/// Parse a `[task:...]` marker the agent emits to schedule a reminder/workflow:
+///   [task:in=3600 say=该喝水啦]              one-shot reminder (relative secs)
+///   [task:every=3600 say=起来动一动]          recurring
+///   [task:daily=09:00 say=早安主人]           every day at 09:00 (Beijing)
+///   [task:daily=09:00 workflow=weather_report city=北京]  run a workflow daily
+/// `say=`/`ask=` text runs to the end (may contain spaces/CJK); workflow params
+/// are single-token `key=value` pairs.
+fn parse_task(s: &str, device_id: &str) -> Option<crate::tasks::ScheduledTask> {
+    use crate::tasks::{ScheduledTask, TaskAction};
+    let s = s.trim();
+    let (action, sched_src): (TaskAction, &str) = if let Some(i) = s.find("say=") {
+        (TaskAction::Say { text: s[i + 4..].trim().to_string() }, &s[..i])
+    } else if let Some(i) = s.find("ask=") {
+        (TaskAction::AgentPrompt { prompt: s[i + 4..].trim().to_string() }, &s[..i])
+    } else if s.contains("workflow=") {
+        let mut name: Option<String> = None;
+        let mut params = std::collections::BTreeMap::new();
+        for tok in s.split_whitespace() {
+            if let Some((k, v)) = tok.split_once('=') {
+                match k {
+                    "workflow" => name = Some(v.to_string()),
+                    "in" | "every" | "daily" => {} // schedule keys
+                    _ => {
+                        params.insert(k.to_string(), v.to_string());
+                    }
+                }
+            }
+        }
+        (TaskAction::Workflow { name: name?, params }, s)
+    } else {
+        return None;
+    };
+    let schedule = parse_schedule(sched_src)?;
+    match &action {
+        TaskAction::Say { text } if text.is_empty() => return None,
+        TaskAction::AgentPrompt { prompt } if prompt.is_empty() => return None,
+        _ => {}
+    }
+    Some(ScheduledTask::new(device_id.to_string(), action, schedule))
+}
+
+/// Parse the schedule from the tokens (`daily=HH:MM` / `every=N` / `in=N`).
+fn parse_schedule(s: &str) -> Option<crate::tasks::Schedule> {
+    use crate::tasks::{now_unix, Schedule};
+    if let Some((h, m)) = grab_daily(s) {
+        return Some(Schedule::Daily { hour: h, minute: m });
+    }
+    if let Some(secs) = grab_num(s, "every=") {
+        return Some(Schedule::Interval { secs });
+    }
+    if let Some(secs) = grab_num(s, "in=") {
+        return Some(Schedule::Once { at: now_unix() + secs as i64 });
+    }
+    None
+}
+
+/// Parse `daily=HH:MM` -> (hour, minute).
+fn grab_daily(s: &str) -> Option<(u32, u32)> {
+    let i = s.find("daily=")? + 6;
+    let tok: String = s[i..]
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == ':')
+        .collect();
+    let (h, m) = tok.split_once(':')?;
+    Some((h.parse().ok()?, m.parse().ok()?))
+}
+
+/// Grab the unsigned integer following `key` in `s` (e.g. key="in=" -> 3600).
+fn grab_num(s: &str, key: &str) -> Option<u64> {
+    let i = s.find(key)? + key.len();
+    let digits: String = s[i..].chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse().ok()
 }
 
 fn parse_do(s: &str) -> Option<ServerMessage> {
@@ -324,7 +443,7 @@ fn split_sentence(s: &str) -> Option<usize> {
 
 /// Speak a single canned/whole phrase as a complete reply turn.
 async fn speak_phrase(
-    sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    tx: &crate::registry::DeviceTx,
     session: &mut Session,
     text: &str,
     emotion: &str,
@@ -336,27 +455,16 @@ async fn speak_phrase(
         audio_follows: true,
     };
     for ev in session.transition_to_speaking(response) {
-        send_event(sender, ev).await;
+        send_event(tx, ev).await;
     }
-    send_audio_stream(sender, audio, true).await;
-    send_event(sender, SessionEvent::SendJson(ServerMessage::SpeakDone)).await;
+    send_audio_stream(tx, audio, true).await;
+    send_event(tx, SessionEvent::SendJson(ServerMessage::SpeakDone)).await;
     for ev in session.finish_speaking() {
-        send_event(sender, ev).await;
+        send_event(tx, ev).await;
     }
 }
 
-async fn send_event(
-    sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
-    event: SessionEvent,
-) {
-    match event {
-        SessionEvent::SendJson(msg) => {
-            if let Ok(json) = serde_json::to_string(&msg) {
-                let _ = sender.send(Message::Text(json.into())).await;
-            }
-        }
-        SessionEvent::SendAudio(data) => {
-            let _ = sender.send(Message::Binary(data.into())).await;
-        }
-    }
+async fn send_event(tx: &crate::registry::DeviceTx, event: SessionEvent) {
+    // Hand the event to the per-device writer task (non-blocking).
+    let _ = tx.send(event);
 }
