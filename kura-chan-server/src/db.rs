@@ -214,11 +214,21 @@ pub async fn bump_growth(
     Some(a)
 }
 
-/// Store the device-reported appearance selection (jsonb).
+/// Merge the device-reported appearance selection into the stored jsonb.
 pub async fn set_appearance(db: &Db, actor_id: &str, appearance: &serde_json::Value) {
-    let _ = sqlx::query("UPDATE actors SET appearance=$2, updated_at=now() WHERE actor_id=$1")
+    let _ = sqlx::query("UPDATE actors SET appearance = appearance || $2, updated_at=now() WHERE actor_id=$1")
         .bind(actor_id)
         .bind(appearance)
+        .execute(db)
+        .await;
+}
+
+/// Merge a single appearance key (server-owned, e.g. bg).
+pub async fn set_appearance_key(db: &Db, actor_id: &str, key: &str, value: serde_json::Value) {
+    let obj = serde_json::json!({ key: value });
+    let _ = sqlx::query("UPDATE actors SET appearance = appearance || $2, updated_at=now() WHERE actor_id=$1")
+        .bind(actor_id)
+        .bind(obj)
         .execute(db)
         .await;
 }

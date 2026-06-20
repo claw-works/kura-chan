@@ -127,16 +127,14 @@ impl Session {
     /// concise device-state line so the agent can answer battery/volume queries.
     pub fn build_user_message(&self, utterance: &str) -> String {
         let mut ctx = String::new();
-        // Current time so the agent can compute reminder schedules.
+        // Current Beijing date/time (the agent decides season itself; hemisphere may differ).
         {
-            use std::time::{SystemTime, UNIX_EPOCH};
-            let secs = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0);
-            let bj = secs + 8 * 3600; // Beijing time (UTC+8)
-            let (h, m) = ((bj % 86400) / 3600, (bj % 3600) / 60);
-            ctx.push_str(&format!("[当前北京时间] {:02}:{:02}\n", h, m));
+            use chrono::{Datelike, FixedOffset, Timelike, Utc};
+            let bj = Utc::now().with_timezone(&FixedOffset::east_opt(8 * 3600).unwrap());
+            ctx.push_str(&format!(
+                "[当前北京时间] {}-{:02}-{:02} {:02}:{:02}\n",
+                bj.year(), bj.month(), bj.day(), bj.hour(), bj.minute()
+            ));
         }
         if self.battery.is_some() || self.volume.is_some() {
             ctx.push_str("[设备状态]");

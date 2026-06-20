@@ -1,16 +1,6 @@
 #include "ws_client.h"
-#include <WiFiUdp.h>
 
 WsClient* WsClient::instance_ = nullptr;
-
-// TEMP DEBUG: report every raw WS library event via UDP
-static void evt_beacon(WStype_t type, size_t length) {
-    if (WiFi.status() != WL_CONNECTED) return;
-    static WiFiUDP udp;
-    udp.beginPacket(IPAddress(192,168,31,249), 8089);
-    udp.printf("EVT type=%d len=%u", (int)type, (unsigned)length);
-    udp.endPacket();
-}
 
 void WsClient::begin(const char* host, uint16_t port, const char* path,
                      const char* api_key, const char* device_id) {
@@ -115,7 +105,6 @@ void WsClient::setState(WsState new_state) {
 }
 
 void WsClient::handleEvent(WStype_t type, uint8_t* payload, size_t length) {
-    evt_beacon(type, length);
     switch (type) {
         case WStype_CONNECTED:
             Serial.println("[WS] Connected");

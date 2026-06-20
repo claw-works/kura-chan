@@ -4,7 +4,6 @@
 // loop, send hello from CONNECTED event, keep drawing throttled.
 #include <M5Unified.h>
 #include <WiFi.h>
-#include <WiFiUdp.h>
 #include <SPI.h>
 #include <SD.h>
 #include <ArduinoJson.h>
@@ -113,10 +112,6 @@ static void init() {
 }
 }  // namespace hw
 
-static WiFiUDP udp_dbg;
-static String g_sd_report = "SD: (not probed)";
-static void dbg(const char* tag);
-
 // === Face geometry ===
 static constexpr int SCREEN_W = 320;
 static constexpr int SCREEN_H = 240;
@@ -224,6 +219,7 @@ static bool is_blinking = false;
 static uint32_t blink_start_ms = 0;
 static constexpr uint32_t BLINK_DURATION_MS = 150;
 static String current_emotion = "neutral";
+static uint32_t emotion_at = 0;
 static bool face_dirty = false;
 
 // === Idle sleep ===
@@ -265,7 +261,7 @@ void draw_status_bar() {
 
     lcd.setCursor(120, 4);
     switch (audio_state) {
-        case AudioState::Listening: lcd.setTextColor(0xFF5555); lcd.printf("LIS %lu", (unsigned long)vad_level); break;
+        case AudioState::Listening: lcd.setTextColor(0xFF5555); lcd.print("LIS"); break;
         case AudioState::Waiting:   lcd.setTextColor(0xFFFF55); lcd.print("THINK"); break;
         case AudioState::Speaking:  lcd.setTextColor(0x55FF55); lcd.print("SPK"); break;
         default:                    lcd.setTextColor(0x666666); lcd.print(asleep ? "zzz" : "idle"); break;
@@ -384,6 +380,11 @@ static void update_face(uint32_t now) {
     pet::setListening(audio_state == AudioState::Listening);
     pet::setThinking(audio_state == AudioState::Waiting);
     pet::setSpeaking(audio_state == AudioState::Speaking && M5.Speaker.isPlaying());
+    // emotion is transient: hold it while speaking, then revert to neutral 4s later so the face blinks again
+    if (current_emotion != "neutral") {
+        if (audio_state == AudioState::Speaking && M5.Speaker.isPlaying()) emotion_at = millis();
+        else if (millis() - emotion_at > 4000) current_emotion = "neutral";
+    }
     pet::setMoodByName(current_emotion.c_str());
 }
 
@@ -490,6 +491,7 @@ static void send_status() {
     {
         JsonDocument ap;
         deserializeJson(ap, pet::appearanceJson());
+        ap.remove("bg");              // bg is server-owned; don't let the device clobber it
         doc["appearance"] = ap;
     }
     String json;
@@ -550,15 +552,6 @@ static void send_recording() {
     Serial.printf("[Audio] sent %u bytes PCM\n", (unsigned)total);
 }
 
-static void dbg(const char* tag) {
-    if (WiFi.status() != WL_CONNECTED) return;
-    udp_dbg.beginPacket(IPAddress(192, 168, 31, 249), 8089);
-    udp_dbg.printf("%s st=%d rec=%u vad=%lu isrec=%d sp=%d",
-                   tag, (int)audio_state, (unsigned)rec_samples,
-                   (unsigned long)vad_level, (int)M5.Mic.isRecording(), (int)speech_detected);
-    udp_dbg.endPacket();
-}
-
 static void go_to_sleep() {
     audio_state = AudioState::Idle;
     asleep = true;
@@ -585,11 +578,9 @@ static void start_listening(uint32_t now_ms, bool followup) {
     last_touch_ms = now_ms;  // hold-to-talk: touching at start
     last_activity_ms = now_ms;  // any new listening turn resets idle/sleep timer
     audio_state = AudioState::Listening;
-    dbg("START");
 }
 
 static void finish_listening(bool send, uint32_t now_ms) {
-    dbg(send ? "FIN_SEND" : "FIN_GIVEUP");
     while (M5.Mic.isRecording()) { delay(1); }
     M5.Mic.end();
     if (send && rec_samples >= (size_t)(SAMPLE_RATE / 2)) {  // >=0.5s recorded -> send
@@ -617,7 +608,7 @@ static void handleServerJson(uint8_t* payload, size_t length) {
         ws_state = 2;
     } else if (strcmp(type, "response") == 0) {
         const char* emotion = doc["emotion"];
-        if (emotion) { current_emotion = emotion; face_dirty = true; }
+        if (emotion) { current_emotion = emotion; emotion_at = millis(); face_dirty = true; }
     } else if (strcmp(type, "speak_done") == 0) {
         server_done = true;  // no more audio for this reply
     } else if (strcmp(type, "sync") == 0) {
@@ -664,14 +655,19 @@ static void handleServerJson(uint8_t* payload, size_t length) {
             else if (strcmp(d, "shake") == 0)  { gesture = 2; gesture_start = millis(); }
         } else if (strcmp(action, "wear") == 0) {
             const char* n = doc["name"];
-            if (n) pet::wear(n);                       // change outfit/hair variant
+            if (n) { pet::wear(n); send_status(); }   // persist new outfit immediately                       // change outfit/hair variant
         } else if (strcmp(action, "blush") == 0) {
             pet::setBlush((int)(doc["value"] | 0) != 0);
+            send_status();   // report new appearance immediately (server persists it)
         } else if (strcmp(action, "glasses") == 0) {
             pet::setAccessory((int)(doc["value"] | 0) != 0);
+            send_status();
         } else if (strcmp(action, "char") == 0) {
             const char* n = doc["name"];
             if (n) pet::setCharacter(n);
+        } else if (strcmp(action, "bg") == 0) {
+            const char* n = doc["name"];
+            pet::setBg(n ? n : "");
         }
     } else if (strcmp(type, "tool_call") == 0) {
         const char* call_id = doc["call_id"];
@@ -778,7 +774,6 @@ void setup() {
             snprintf(buf, sizeof buf, "SD ok type=%u size=%lluMB entries=%d [%s] (sck=%d cs=%d)",
                      t, (unsigned long long)mb, n, names.c_str(), sck, cs);
         }
-        g_sd_report = buf;
         Serial.println(buf);
     }
     pet::init(configStore.getPetCharacter().c_str());   // image-based pet renderer (loads /pet/<char>/ from SD)
@@ -840,13 +835,6 @@ void setup() {
                     configStore.getServerPort(),
                     configStore.getServerPath().c_str());
     last_activity_ms = millis();
-
-    // ---- report SD probe result via UDP (now that WiFi is up) ----
-    if (WiFi.status() == WL_CONNECTED) {
-        udp_dbg.beginPacket(IPAddress(192, 168, 31, 249), 8089);
-        udp_dbg.print(g_sd_report);
-        udp_dbg.endPacket();
-    }
 }
 
 void loop() {
@@ -892,8 +880,7 @@ void loop() {
     if (audio_state == AudioState::Listening) {
         if (talk) last_touch_ms = now;
         if (tap && !started_now && (now - listen_start_ms > MIN_HOLD_MS)) stop_req = true;
-        static uint32_t last_dbg = 0;
-        if (now - last_dbg > 200) { last_dbg = now; dbg("L"); }
+
         if (!M5.Mic.isRecording()) {
             if (chunk_pending) {
                 int64_t sum = 0;
@@ -948,7 +935,6 @@ void loop() {
         speaker_pending = false;
         asleep = false;          // incoming audio (reply or proactive push) wakes the device
         last_activity_ms = now;  // AI answer arriving → reset idle/sleep timer
-        dbg("PLAY");
         M5.Mic.end();
         M5.Speaker.begin();
         M5.Speaker.setVolume(200);
@@ -975,7 +961,6 @@ void loop() {
         }
         // reply fully played → go idle; the sleep countdown starts from NOW
         if (server_done && play_pos >= play_bytes && !M5.Speaker.isPlaying()) {
-            dbg("SPKDONE");
             audio_state = AudioState::Idle;   // stay awake, idle
             last_activity_ms = now;           // idle timer starts only now
             draw_status_bar();
@@ -985,7 +970,6 @@ void loop() {
     // Inference can take minutes, so keep this generous; a real disconnect resets
     // immediately via WStype_DISCONNECTED.
     if (audio_state == AudioState::Waiting && now - waiting_since > 300000) {
-        dbg("WTO");
         go_to_sleep();
         draw_status_bar();
     }

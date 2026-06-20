@@ -73,7 +73,8 @@ pub enum ServerMessage {
 #[derive(Debug, Serialize)]
 pub struct SyncState {
     pub gender: String,
-    pub appearance: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub appearance: Option<serde_json::Value>,
     pub level: i32,
     pub xp: i32,
     pub xp_need: i32,

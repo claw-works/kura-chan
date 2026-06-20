@@ -106,14 +106,15 @@ async fn handle_socket(socket: WebSocket, device_id: String, mut actor: Actor, s
 
     let mut session = Session::new(device_id.clone(), state.config.clone());
 
-    // per-actor system prompt = name + persona prefix + common rules (from config)
+    // per-actor system prompt = name + persona prefix + common rules + live asset options
     let rules = state.config.agent.system_prompt.clone();
     let persona_full = format!("你的名字是{}。{}", actor.name, actor.persona.trim());
-    let system_prompt = format!("{}\n\n{}", persona_full.trim(), rules);
+    let options = crate::assets::options_prompt(&actor.gender);
+    let system_prompt = format!("{}\n\n{}\n\n{}", persona_full.trim(), rules, options);
     let session_ttl = state.config.session.idle_new_session_secs as i64;
 
     // push server-authoritative state to the device on connect
-    send_event(&tx, sync_msg(&actor)).await;
+    send_event(&tx, sync_msg(&actor, true)).await;
 
     while let Some(msg) = receiver.next().await {
         let msg = match msg {
@@ -131,7 +132,9 @@ async fn handle_socket(socket: WebSocket, device_id: String, mut actor: Actor, s
                     Ok(ClientMessage::ToolResult(result)) => session.handle_tool_result(result),
                     Ok(ClientMessage::Status(status)) => {
                         if let Some(ap) = &status.appearance {
-                            db::set_appearance(&state.db, &actor.actor_id, ap).await;
+                            let mut ap2 = ap.clone();
+                            if let Some(o) = ap2.as_object_mut() { o.remove("bg"); }  // bg is server-owned
+                            db::set_appearance(&state.db, &actor.actor_id, &ap2).await;
                         }
                         session.handle_status(status)
                     }
@@ -139,7 +142,7 @@ async fn handle_socket(socket: WebSocket, device_id: String, mut actor: Actor, s
                         if ev.kind == "head_pat" {
                             if let Some(a) = db::bump_growth(&state.db, &actor.actor_id, 3, 3, 0).await {
                                 actor = a;
-                                send_event(&tx, sync_msg(&actor)).await;
+                                send_event(&tx, sync_msg(&actor, false)).await;
                             }
                         }
                         vec![]
@@ -230,6 +233,7 @@ async fn handle_socket(socket: WebSocket, device_id: String, mut actor: Actor, s
 
                     let mut buf = String::new();
                     let mut new_tasks: Vec<crate::tasks::ScheduledTask> = Vec::new();
+                    let mut appearance_ops: Vec<(String, serde_json::Value)> = Vec::new();
                     let mut reply_text = String::new();
                     let mut want_new_session = false;
                     let mut first = true;
@@ -239,7 +243,7 @@ async fn handle_socket(socket: WebSocket, device_id: String, mut actor: Actor, s
                             Ok(Some(event)) => {
                                 if let Some(t) = extract_text_delta(&event) {
                                     buf.push_str(&t);
-                                    for msg in extract_tags(&mut buf, &device_id, &mut new_tasks, &mut want_new_session) {
+                                    for msg in extract_tags(&mut buf, &device_id, &mut new_tasks, &mut want_new_session, &mut appearance_ops) {
                                         send_event(&tx, SessionEvent::SendJson(msg)).await;
                                     }
                                     while let Some(cut) = split_sentence(&buf) {
@@ -266,7 +270,7 @@ async fn handle_socket(socket: WebSocket, device_id: String, mut actor: Actor, s
                         }
                     }
                     // flush trailing text
-                    for msg in extract_tags(&mut buf, &device_id, &mut new_tasks, &mut want_new_session) {
+                    for msg in extract_tags(&mut buf, &device_id, &mut new_tasks, &mut want_new_session, &mut appearance_ops) {
                         send_event(&tx, SessionEvent::SendJson(msg)).await;
                     }
                     let rest = buf.trim().to_string();
@@ -297,10 +301,14 @@ async fn handle_socket(socket: WebSocket, device_id: String, mut actor: Actor, s
                         db::log_message(&state.db, &conv_session, &actor.actor_id, "assistant", &reply_text).await;
                     }
                     db::touch_session(&state.db, &conv_session).await;
+                    // persist any server-owned appearance changes (bg/blush/glasses) the agent made
+                    for (k, v) in &appearance_ops {
+                        db::set_appearance_key(&state.db, &actor.actor_id, k, v.clone()).await;
+                    }
                     // server-authoritative growth: a completed turn earns xp/bond, costs energy
                     if let Some(a) = db::bump_growth(&state.db, &actor.actor_id, 12, 2, -4).await {
                         actor = a;
-                        send_event(&tx, sync_msg(&actor)).await;
+                        send_event(&tx, sync_msg(&actor, false)).await;
                     }
                     if want_new_session {
                         if let Ok(sid) = db::new_session(&state.db, &actor.actor_id).await {
@@ -360,6 +368,7 @@ fn extract_tags(
     device_id: &str,
     tasks: &mut Vec<crate::tasks::ScheduledTask>,
     new_session: &mut bool,
+    apps: &mut Vec<(String, serde_json::Value)>,
 ) -> Vec<ServerMessage> {
     let mut out = Vec::new();
     let mut search = 0;
@@ -374,6 +383,17 @@ fn extract_tags(
                 *new_session = true;
             } else if let Some(msg) = parse_do(rest) {
                 out.push(msg);
+            }
+            // server-owned appearance keys (persisted to the actor)
+            if let Some((k, v)) = rest.split_once('=') {
+                let (k, v) = (k.trim(), v.trim());
+                let b = v == "on" || v == "1" || v == "true";
+                match k {
+                    "bg" => apps.push(("bg".into(), serde_json::Value::String(v.to_string()))),
+                    "blush" => apps.push(("blush".into(), serde_json::json!(b))),
+                    "glasses" => apps.push(("glasses".into(), serde_json::json!(b))),
+                    _ => {}
+                }
             }
             buf.replace_range(open..close + 1, "");
             search = open;
@@ -484,6 +504,7 @@ fn parse_do(s: &str) -> Option<ServerMessage> {
         "blush" => ControlMessage { action: "blush".into(), value: Some(on(val)), color: None, dir: None, name: None },
         "glasses" => ControlMessage { action: "glasses".into(), value: Some(on(val)), color: None, dir: None, name: None },
         "char" => ControlMessage { action: "char".into(), value: None, color: None, dir: None, name: Some(val.to_string()) },
+        "bg" => ControlMessage { action: "bg".into(), value: None, color: None, dir: None, name: Some(val.to_string()) },
         _ => return None,
     };
     Some(ServerMessage::Control(msg))
@@ -535,11 +556,12 @@ async fn send_event(tx: &crate::registry::DeviceTx, event: SessionEvent) {
     let _ = tx.send(event);
 }
 
-/// Build a Sync event from the actor's current server-authoritative state.
-fn sync_msg(a: &Actor) -> SessionEvent {
+/// Build a Sync event. `full` includes appearance (used on connect to restore);
+/// growth-only syncs omit it so they don't revert a just-applied outfit change.
+fn sync_msg(a: &Actor, full: bool) -> SessionEvent {
     SessionEvent::SendJson(ServerMessage::Sync(SyncState {
         gender: a.gender.clone(),
-        appearance: a.appearance.clone(),
+        appearance: if full { Some(a.appearance.clone()) } else { None },
         level: a.level,
         xp: a.xp,
         xp_need: db::xp_need(a.level),

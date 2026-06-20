@@ -52,5 +52,6 @@ bool consumeLevelUp();                   // true once right after level increase
 void setServer(const char* host, uint16_t port);          // for fetching art over HTTP
 void applySync(const char* gender, const char* appearanceJson); // gender + appearance from sync
 String appearanceJson();                 // current appearance selection (for status report)
+void setBg(const char* name);            // scene background (fetched from /assets/bg/<name>.png; "" = none)
 
 }  // namespace pet

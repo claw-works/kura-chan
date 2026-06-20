@@ -40,6 +40,10 @@ static int charW = 200, charH = 240, charX = 60, charY = 0;
 
 static M5Canvas canvas(&M5.Display);
 static M5Canvas spBody(&M5.Display);   // rgb565, baked back layers over BG
+static M5Canvas sceneBg(&M5.Display);  // rgb565, full-screen scene background (fixed)
+static char g_bg[28] = "";             // current scene bg name ("" = pastel)
+static bool sceneActive = false;
+static volatile bool g_needBg = false;
 
 enum Slot { S_BG, S_HAIRBACK, S_BODY, S_BLUSH, S_COSTUME, S_HAIRFRONT, S_ACCESSORY, S_COUNT };
 static String slotVars[S_COUNT][20];
@@ -125,6 +129,10 @@ static void loadPref() {
     g_pref.sel[S_BLUSH] = String((const char*)(d["blushvar"] | ""));
     g_pref.blush = d["blush"] | false;
     g_pref.glasses = d["glasses"] | true;
+    {
+        const char* bg = d["bg"] | "";
+        if (*bg) { strncpy(g_bg, bg, sizeof g_bg - 1); g_bg[sizeof g_bg - 1] = 0; g_needBg = true; }
+    }
 }
 
 static void savePref() {
@@ -136,6 +144,7 @@ static void savePref() {
     d["blushvar"] = slotFile(S_BLUSH);
     d["blush"] = blushOn;
     d["glasses"] = accessoryOn;
+    d["bg"] = g_bg;
     File f = LittleFS.open(PREF_PATH, "w");
     if (f) { serializeJson(d, f); f.close(); }
 }
@@ -201,7 +210,10 @@ static void invalidate() {
 
 static void bakeBody() {
     if (!makeRGB(spBody)) return;
-    spBody.fillScreen(spBody.color565((BGc >> 16) & 0xFF, (BGc >> 8) & 0xFF, BGc & 0xFF));
+    if (sceneActive && sceneBg.getBuffer())
+        sceneBg.pushSprite(&spBody, -charX, -charY);   // bake over the bg region behind the character
+    else
+        spBody.fillScreen(spBody.color565((BGc >> 16) & 0xFF, (BGc >> 8) & 0xFF, BGc & 0xFF));
     drawInto(spBody, slotFile(S_BG));
     drawInto(spBody, slotFile(S_HAIRBACK));
     drawInto(spBody, slotFile(S_BODY));
@@ -230,8 +242,8 @@ static int ensureFace(int idx) {
     faceState[idx] = 1;
     return idx;
 }
-static int moodFace() {
-    switch (g_mood) {
+static int moodFace(Mood m) {
+    switch (m) {
         case Mood::Happy: return findFaceAny({"happy_1", "happy_2", "base"});
         case Mood::Sad: return findFaceAny({"sad_1", "sad_2", "base"});
         case Mood::Angry: return findFaceAny({"angry", "annoyed_1", "base"});
@@ -242,11 +254,12 @@ static int moodFace() {
     }
 }
 static int pickFace(bool blink, bool talkOpen) {
+    Mood m = g_mood;
     int idx;
     if (g_asleep) idx = findFaceAny({"base_blink", "base", "neutral"});
     else if (g_speaking && talkOpen) idx = findFaceAny({"base_talk", "talk", "base", "neutral"});
     else if (g_speaking) idx = findFaceAny({"base", "neutral"});
-    else if (g_mood != Mood::Neutral) { idx = moodFace(); if (idx < 0) idx = findFaceAny({"base", "neutral"}); }
+    else if (m != Mood::Neutral) { idx = moodFace(m); if (idx < 0) idx = findFaceAny({"base", "neutral"}); }
     else if (blink) idx = findFaceAny({"base_blink", "blink", "base"});
     else idx = findFaceAny({"base", "neutral"});
     if (idx < 0 && faceCount > 0) idx = 0;
@@ -291,6 +304,7 @@ static void applyAppearance(const char* json) {
     setf(S_BLUSH, "blushvar");
     if (!d["blush"].isNull()) blushOn = d["blush"];
     if (!d["glasses"].isNull()) accessoryOn = d["glasses"];
+    if (d["bg"].is<const char*>()) setBg(d["bg"]);
     if (slotSel[S_HAIRBACK] != oh || slotSel[S_HAIRFRONT] != ofr || slotSel[S_COSTUME] != oc ||
         slotSel[S_BLUSH] != ob || blushOn != obl || accessoryOn != og) {
         invalidate();
@@ -342,8 +356,47 @@ static void downloadAssets() {
     }
 }
 
+// Load the scene background (download from server if missing); sets sceneActive.
+static void loadScene() {
+    sceneActive = false;
+    if (g_bg[0] == 0) { sceneBg.deleteSprite(); return; }
+    String path = String("/pet/cache/bg/") + g_bg + ".png";
+    if (!SD.exists(path) && g_host[0] && WiFi.status() == WL_CONNECTED) {
+        SD.mkdir("/pet"); SD.mkdir("/pet/cache"); SD.mkdir("/pet/cache/bg");
+        String url = String("http://") + g_host + ":" + g_port + "/assets/bg/" + g_bg + ".png?h=" + String(SCR_H);
+        HTTPClient h;
+        h.setConnectTimeout(5000); h.setTimeout(8000);
+        h.begin(url);
+        if (h.GET() == 200) {
+            File f = SD.open(path, FILE_WRITE);
+            if (f) { h.writeToStream(&f); f.close(); }
+        }
+        h.end();
+    }
+    if (SD.exists(path)) {
+        // read native size, scale to fill the whole screen (robust to any cached size)
+        int w = SCR_W, h = SCR_H;
+        File pf = SD.open(path, FILE_READ);
+        if (pf) {
+            uint8_t b[24];
+            if (pf.read(b, 24) == 24) {
+                int W = (b[16] << 24) | (b[17] << 16) | (b[18] << 8) | b[19];
+                int H = (b[20] << 24) | (b[21] << 16) | (b[22] << 8) | b[23];
+                if (W > 0 && H > 0 && W < 20000 && H < 20000) { w = W; h = H; }
+            }
+            pf.close();
+        }
+        if (!sceneBg.getBuffer()) { sceneBg.setColorDepth(16); sceneBg.setPsram(true); sceneBg.createSprite(SCR_W, SCR_H); }
+        sceneBg.fillScreen(sceneBg.color565((BGc >> 16) & 0xFF, (BGc >> 8) & 0xFF, BGc & 0xFF));
+        float sx = (float)SCR_W / w, sy = (float)SCR_H / h;
+        sceneBg.drawPngFile(SD, path.c_str(), 0, 0, 0, 0, 0, 0, sx, sy);
+        sceneActive = true;
+    }
+}
+
 static void renderFrame(uint32_t now) {
     if (g_needReset) { g_needReset = false; resetAssets(); }
+    if (g_needBg) { g_needBg = false; loadScene(); invalidate(); }
     if (g_needDownload) {
         g_needDownload = false;
         canvas.fillScreen(canvas.color565((BGc >> 16) & 0xFF, (BGc >> 8) & 0xFF, BGc & 0xFF));
@@ -373,7 +426,14 @@ static void renderFrame(uint32_t now) {
     bool showBlush = blushOn || g_mood == Mood::Love;
     static bool lastBlush = false;
     if (showBlush != lastBlush) { lastBlush = showBlush; blushOn = showBlush; invalidate(); }
-    if (!bodyReady) { bakeBody(); for (int i = 0; i < MAXFACE; i++) if (faceState[i] == 1) faceState[i] = 0; }
+    if (!bodyReady) {
+        bakeBody();
+        for (int i = 0; i < MAXFACE; i++) if (faceState[i] == 1) faceState[i] = 0;
+        // pre-bake the idle faces so blink/talk never stall (or get skipped) on first use
+        ensureFace(findFaceAny({"base", "neutral"}));
+        ensureFace(findFaceAny({"base_blink"}));
+        ensureFace(findFaceAny({"base_talk"}));
+    }
 
     float t = now / 1000.0f;
     float bob = sinf(t * 2.2f) * 3.0f;
@@ -392,8 +452,14 @@ static void renderFrame(uint32_t now) {
 
     int f = pickFace(blinking, talkOpen);
 
-    canvas.fillScreen(canvas.color565((BGc >> 16) & 0xFF, (BGc >> 8) & 0xFF, BGc & 0xFF));
-    int y = charY + (int)curBob;
+    if (sceneActive && sceneBg.getBuffer()) {
+        sceneBg.pushSprite(&canvas, 0, 0);            // fixed full-screen background
+    } else {
+        canvas.fillScreen(canvas.color565((BGc >> 16) & 0xFF, (BGc >> 8) & 0xFF, BGc & 0xFF));
+    }
+    // Over a scene bg the character composite carries a baked bg patch, so a big
+    // bob would visibly move that patch; keep it tiny there (bg looks fixed).
+    int y = charY + (int)(sceneActive ? curBob * 0.3f : curBob);
     if (f >= 0 && faceComp[f].getBuffer()) faceComp[f].pushSprite(&canvas, charX, y);
     else if (bodyReady) spBody.pushSprite(&canvas, charX, y);
 
@@ -431,6 +497,14 @@ void wear(const char* token) {
 }
 void setBlush(bool on) { if (blushOn != on) { blushOn = on; invalidate(); g_savePref = true; } }
 void setAccessory(bool on) { if (accessoryOn != on) { accessoryOn = on; invalidate(); g_savePref = true; } }
+
+void setBg(const char* name) {
+    const char* n = name ? name : "";
+    if (strcmp(n, g_bg) == 0) return;
+    strncpy(g_bg, n, sizeof g_bg - 1); g_bg[sizeof g_bg - 1] = 0;
+    g_needBg = true;     // render task loads the scene + rebakes the character
+    g_savePref = true;
+}
 void setCharacter(const char* id) {
     if (!id || !*id) return;
     snprintf(g_dir, sizeof g_dir, "/pet/%s", id);
@@ -473,6 +547,7 @@ String appearanceJson() {
     d["blushvar"] = slotFile(S_BLUSH);
     d["blush"] = blushOn;
     d["glasses"] = accessoryOn;
+    d["bg"] = g_bg;
     String s;
     serializeJson(d, s);
     return s;
