@@ -16,6 +16,7 @@ pub struct Actor {
     pub xp: i32,
     pub bond: i32,
     pub energy: i32,
+    pub appearance: serde_json::Value,
 }
 
 pub fn hash_key(key: &str) -> String {
@@ -37,7 +38,11 @@ pub async fn connect(url: &str) -> Result<Db, sqlx::Error> {
     Ok(pool)
 }
 
-const ACTOR_COLS: &str = "actor_id, device_id, name, gender, persona, level, xp, bond, energy";
+const ACTOR_COLS: &str = "actor_id, device_id, name, gender, persona, level, xp, bond, energy, appearance";
+
+pub fn xp_need(level: i32) -> i32 {
+    level.max(1) * 100
+}
 
 pub async fn actor_by_key(db: &Db, api_key: &str) -> Option<Actor> {
     let h = hash_key(api_key);
@@ -111,7 +116,7 @@ pub async fn seed_dev(db: &Db) -> Result<(), sqlx::Error> {
     if exists.is_none() {
         sqlx::query(
             "INSERT INTO actors (actor_id, api_key_hash, device_id, name, gender) \
-             VALUES ('actor_mixue', $1, 'KURA_CHAN_001', '小爪', 'girl')",
+             VALUES ('actor_seed_dev', $1, 'SEED_DEV', '小爪', 'girl')",
         )
         .bind(&h)
         .execute(db)
@@ -177,6 +182,46 @@ pub async fn touch_session(db: &Db, session_id: &str) {
 }
 
 // ---- messages ----
+
+// ---- growth / appearance (server-authoritative) ----
+
+/// Apply growth deltas; returns the updated actor (with level-ups applied).
+pub async fn bump_growth(
+    db: &Db,
+    actor_id: &str,
+    dxp: i32,
+    dbond: i32,
+    denergy: i32,
+) -> Option<Actor> {
+    let mut a = actor_by_id(db, actor_id).await?;
+    a.xp += dxp;
+    while a.xp >= xp_need(a.level) {
+        a.xp -= xp_need(a.level);
+        a.level += 1;
+    }
+    a.bond = (a.bond + dbond).clamp(0, 100);
+    a.energy = (a.energy + denergy).clamp(0, 100);
+    let _ = sqlx::query(
+        "UPDATE actors SET level=$2, xp=$3, bond=$4, energy=$5, updated_at=now() WHERE actor_id=$1",
+    )
+    .bind(actor_id)
+    .bind(a.level)
+    .bind(a.xp)
+    .bind(a.bond)
+    .bind(a.energy)
+    .execute(db)
+    .await;
+    Some(a)
+}
+
+/// Store the device-reported appearance selection (jsonb).
+pub async fn set_appearance(db: &Db, actor_id: &str, appearance: &serde_json::Value) {
+    let _ = sqlx::query("UPDATE actors SET appearance=$2, updated_at=now() WHERE actor_id=$1")
+        .bind(actor_id)
+        .bind(appearance)
+        .execute(db)
+        .await;
+}
 
 pub async fn log_message(db: &Db, session_id: &str, actor_id: &str, role: &str, content: &str) {
     let _ = sqlx::query(

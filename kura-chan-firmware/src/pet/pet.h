@@ -33,21 +33,24 @@ void setBlush(bool on);           // show/hide blush (default off)
 void setAccessory(bool on);       // show/hide accessory e.g. glasses (default on)
 void setCharacter(const char* id);// switch character folder /pet/<id>/ (reloads)
 
-// ===== Growth / needs model =====
+// ===== Growth / needs model (server-authoritative; device displays synced values) =====
 struct Stats {
     int level;
-    int xpInLevel;   // xp accumulated toward next level
-    int xpNeed;      // xp required for next level
-    int bond;        // 0..100 affection
-    int energy;      // 0..100
-    long totalTurns; // lifetime conversation turns
+    int xpInLevel;
+    int xpNeed;
+    int bond;
+    int energy;
+    long totalTurns;
 };
 
-void statsBegin();                       // load persisted state (LittleFS)
-void onInteraction();                    // a conversation turn completed
-void onHeadPat();                        // head was patted
-void statsTick(uint32_t nowMs, bool resting);  // drift + autosave (call from loop)
+void statsBegin();                       // load cached state (offline display before first sync)
+void setStats(int level, int xp, int xpNeed, int bond, int energy);  // from server sync
 Stats getStats();
-bool consumeLevelUp();                   // returns true once right after a level-up
+bool consumeLevelUp();                   // true once right after level increased
+
+// ===== Server-driven appearance + assets =====
+void setServer(const char* host, uint16_t port);          // for fetching art over HTTP
+void applySync(const char* gender, const char* appearanceJson); // gender + appearance from sync
+String appearanceJson();                 // current appearance selection (for status report)
 
 }  // namespace pet

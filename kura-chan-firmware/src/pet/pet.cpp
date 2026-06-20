@@ -6,6 +6,8 @@
 #include <math.h>
 #include <initializer_list>
 #include <ArduinoJson.h>
+#include <HTTPClient.h>
+#include <WiFi.h>
 
 // Image-based desktop-pet renderer. Layers are transparent PNGs (pre-scaled to
 // the screen, drawn 1:1). M5GFX can alpha-composite a PNG onto an rgb565 target
@@ -24,8 +26,15 @@ static volatile int g_level = 1;
 
 static constexpr int SCR_W = 320, SCR_H = 240;
 static constexpr uint32_t BGc = 0xE9EFF1;
-static char g_dir[40] = "/pet/mixue";
+static char g_dir[40] = "/pet/cache/girl";   // SD cache (fetched from server); sync may switch gender
 static fs::FS* g_fs = nullptr;
+static char g_gender[12] = "girl";
+static char g_host[40] = "";
+static uint16_t g_port = 8080;
+static volatile bool g_needDownload = false;
+static volatile bool g_needReset = false;
+static bool g_downloadTried = false;
+static String g_pendingAppearance;
 
 static int charW = 200, charH = 240, charX = 60, charY = 0;
 
@@ -265,11 +274,100 @@ static void drawHUD() {
     drawBar(10, 56, 92, 7, xpPct, g.color565(0x6F, 0xB7, 0xF0));
 }
 
+static void applyAppearance(const char* json) {
+    JsonDocument d;
+    if (deserializeJson(d, json)) return;
+    int oh = slotSel[S_HAIRBACK], ofr = slotSel[S_HAIRFRONT], oc = slotSel[S_COSTUME], ob = slotSel[S_BLUSH];
+    bool obl = blushOn, og = accessoryOn;
+    auto setf = [&](int s, const char* key) {
+        const char* f = d[key] | "";
+        if (*f)
+            for (int i = 0; i < slotVarN[s]; i++)
+                if (slotVars[s][i] == f) { slotSel[s] = i; break; }
+    };
+    setf(S_HAIRBACK, "hairback");
+    setf(S_HAIRFRONT, "hairfront");
+    setf(S_COSTUME, "costume");
+    setf(S_BLUSH, "blushvar");
+    if (!d["blush"].isNull()) blushOn = d["blush"];
+    if (!d["glasses"].isNull()) accessoryOn = d["glasses"];
+    if (slotSel[S_HAIRBACK] != oh || slotSel[S_HAIRFRONT] != ofr || slotSel[S_COSTUME] != oc ||
+        slotSel[S_BLUSH] != ob || blushOn != obl || accessoryOn != og) {
+        invalidate();
+    }
+}
+
+static void resetAssets() {
+    spBody.deleteSprite();
+    for (int i = 0; i < MAXFACE; i++) { faceComp[i].deleteSprite(); faceState[i] = 0; }
+    for (int i = 0; i < S_COUNT; i++) slotVarN[i] = 0;
+    faceCount = 0;
+    bodyReady = false;
+}
+
+// Fetch the gender's art set from the server into /pet/cache/<gender>/ (scaled to
+// the screen height); only downloads files not already cached.
+static void downloadAssets() {
+    if (g_host[0] == 0 || WiFi.status() != WL_CONNECTED) return;
+    String base = String("http://") + g_host + ":" + g_port;
+    SD.mkdir("/pet");
+    SD.mkdir("/pet/cache");
+    String gdir = String("/pet/cache/") + g_gender;
+    SD.mkdir(gdir.c_str());
+    HTTPClient http;
+    http.setConnectTimeout(5000);
+    http.setTimeout(8000);
+    http.begin(base + "/assets/" + g_gender);
+    int code = http.GET();
+    if (code != 200) { http.end(); return; }
+    String body = http.getString();
+    http.end();
+    JsonDocument list;
+    if (deserializeJson(list, body)) return;
+    for (JsonVariant v : list.as<JsonArray>()) {
+        String name = v.as<String>();
+        if (!name.endsWith(".png")) continue;
+        String path = gdir + "/" + name;
+        if (SD.exists(path)) continue;
+        String url = base + "/assets/" + g_gender + "/" + name + "?h=" + String(SCR_H);
+        HTTPClient h2;
+        h2.setConnectTimeout(5000);
+        h2.setTimeout(8000);
+        h2.begin(url);
+        if (h2.GET() == 200) {
+            File f = SD.open(path, FILE_WRITE);
+            if (f) { h2.writeToStream(&f); f.close(); }
+        }
+        h2.end();
+    }
+}
+
 static void renderFrame(uint32_t now) {
+    if (g_needReset) { g_needReset = false; resetAssets(); }
+    if (g_needDownload) {
+        g_needDownload = false;
+        canvas.fillScreen(canvas.color565((BGc >> 16) & 0xFF, (BGc >> 8) & 0xFF, BGc & 0xFF));
+        canvas.setTextColor(canvas.color565(0x55, 0x5B, 0x6B));
+        canvas.setFont(&fonts::Font2);
+        canvas.setCursor(96, 110);
+        canvas.print("loading art...");
+        canvas.pushSprite(0, 0);
+        downloadAssets();
+        g_needLoad = true;
+    }
     if (g_needLoad) {
         g_needLoad = false;
         scanAssets();
-        invalidate();
+        if (slotVarN[S_BODY] == 0 && !g_downloadTried && WiFi.status() == WL_CONNECTED) {
+            g_downloadTried = true;   // cache empty -> fetch from server, then reload
+            g_needDownload = true;
+        } else {
+            if (g_pendingAppearance.length()) {
+                applyAppearance(g_pendingAppearance.c_str());
+                g_pendingAppearance = "";
+            }
+            invalidate();
+        }
     }
     if (g_savePref) { g_savePref = false; savePref(); }
     bool showBlush = blushOn || g_mood == Mood::Love;
@@ -301,9 +399,10 @@ static void renderFrame(uint32_t now) {
 
     if (!bodyReady && f < 0) {
         canvas.setTextColor(canvas.color565(0x55, 0x5B, 0x6B));
-        canvas.setFont(&fonts::Font2);
-        canvas.setCursor(90, 110); canvas.print("no assets:");
-        canvas.setCursor(90, 134); canvas.print(g_dir);
+        canvas.setFont(&fonts::Font4);
+        canvas.setTextDatum(middle_center);
+        canvas.drawString("loading...", SCR_W / 2, SCR_H / 2);
+        canvas.setTextDatum(top_left);
     }
     drawHUD();
     canvas.pushSprite(0, 0);
@@ -320,7 +419,7 @@ void init(const char* charId) {
     canvas.setColorDepth(16);
     canvas.setPsram(true);
     canvas.createSprite(SCR_W, SCR_H);
-    xTaskCreatePinnedToCore(renderTask, "pet", 12288, nullptr, 1, nullptr, 0);
+    xTaskCreatePinnedToCore(renderTask, "pet", 24576, nullptr, 1, nullptr, 0);
 }
 
 void wear(const char* token) {
@@ -336,8 +435,47 @@ void setCharacter(const char* id) {
     if (!id || !*id) return;
     snprintf(g_dir, sizeof g_dir, "/pet/%s", id);
     g_pref.valid = false;   // new character -> use its defaults until changed
+    g_needReset = true;     // render task frees sprites
     g_needLoad = true;
     g_savePref = true;
+}
+
+void setServer(const char* host, uint16_t port) {
+    if (host && *host) { strncpy(g_host, host, sizeof g_host - 1); g_host[sizeof g_host - 1] = 0; }
+    g_port = port;
+}
+
+void applySync(const char* gender, const char* appearance) {
+    if (gender && *gender) { strncpy(g_gender, gender, sizeof g_gender - 1); g_gender[sizeof g_gender - 1] = 0; }
+    char want[40];
+    snprintf(want, sizeof want, "/pet/cache/%s", g_gender);
+    if (strcmp(g_dir, want) != 0) {
+        strncpy(g_dir, want, sizeof g_dir - 1); g_dir[sizeof g_dir - 1] = 0;
+        g_needReset = true;       // render task frees sprites
+        g_downloadTried = false;  // allow a fresh download for the new gender
+        g_pendingAppearance = (appearance && *appearance) ? String(appearance) : String();
+        g_needLoad = true;
+    } else if (appearance && *appearance) {
+        applyAppearance(appearance);  // RAM-only (safe from this task)
+        if (!bodyReady) {             // not loaded yet (e.g. cache was empty at boot) -> reload now
+            g_pendingAppearance = appearance;
+            g_downloadTried = false;
+            g_needLoad = true;
+        }
+    }
+}
+
+String appearanceJson() {
+    JsonDocument d;
+    d["hairback"] = slotFile(S_HAIRBACK);
+    d["hairfront"] = slotFile(S_HAIRFRONT);
+    d["costume"] = slotFile(S_COSTUME);
+    d["blushvar"] = slotFile(S_BLUSH);
+    d["blush"] = blushOn;
+    d["glasses"] = accessoryOn;
+    String s;
+    serializeJson(d, s);
+    return s;
 }
 
 void setMood(Mood m) { g_mood = m; }

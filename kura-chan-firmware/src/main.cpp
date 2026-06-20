@@ -486,6 +486,12 @@ static void send_status() {
     // emits true/false (server expects a JSON boolean, not integer 0/1).
     doc["charging"] = ((int)M5.Power.isCharging() != 0);
     doc["volume"] = cur_volume_pct;
+    // report current appearance selection so the server can persist it
+    {
+        JsonDocument ap;
+        deserializeJson(ap, pet::appearanceJson());
+        doc["appearance"] = ap;
+    }
     String json;
     serializeJson(doc, json);
     webSocket.sendTXT(json);
@@ -614,6 +620,14 @@ static void handleServerJson(uint8_t* payload, size_t length) {
         if (emotion) { current_emotion = emotion; face_dirty = true; }
     } else if (strcmp(type, "speak_done") == 0) {
         server_done = true;  // no more audio for this reply
+    } else if (strcmp(type, "sync") == 0) {
+        // server-authoritative state: growth + gender + appearance
+        pet::setStats(doc["level"] | 1, doc["xp"] | 0, doc["xp_need"] | 100,
+                      doc["bond"] | 0, doc["energy"] | 0);
+        const char* gender = doc["gender"] | "girl";
+        String ap;
+        if (!doc["appearance"].isNull()) serializeJson(doc["appearance"], ap);
+        pet::applySync(gender, ap.c_str());
     } else if (strcmp(type, "control") == 0) {
         const char* action = doc["action"];
         if (!action) return;
@@ -768,7 +782,8 @@ void setup() {
         Serial.println(buf);
     }
     pet::init(configStore.getPetCharacter().c_str());   // image-based pet renderer (loads /pet/<char>/ from SD)
-    pet::statsBegin();  // load growth state + set appearance level
+    pet::setServer(configStore.getServerHost().c_str(), configStore.getServerPort());  // for fetching art over HTTP
+    pet::statsBegin();  // load cached growth (offline display before first sync)
 
     // Allocate audio buffers in PSRAM
     rec_buf = (int16_t*)heap_caps_malloc(REC_MAX_SAMPLES * sizeof(int16_t), MALLOC_CAP_SPIRAM);
@@ -847,7 +862,9 @@ void loop() {
     static bool prev_talk = false;
     bool tap = talk && !prev_talk;        // rising edge = a fresh tap
     prev_talk = talk;
-    if (tap) pet::onHeadPat();            // head pat -> bond + xp
+    if (tap && ws_state >= 1) {            // head pat -> report event (server adds bond/xp)
+        webSocket.sendTXT("{\"type\":\"event\",\"kind\":\"head_pat\"}");
+    }
     bool started_now = false;
     static bool stop_req = false;
 
@@ -959,7 +976,6 @@ void loop() {
         // reply fully played → go idle; the sleep countdown starts from NOW
         if (server_done && play_pos >= play_bytes && !M5.Speaker.isPlaying()) {
             dbg("SPKDONE");
-            pet::onInteraction();   // completed conversation turn -> xp + bond
             audio_state = AudioState::Idle;   // stay awake, idle
             last_activity_ms = now;           // idle timer starts only now
             draw_status_bar();
@@ -989,8 +1005,7 @@ void loop() {
     // Face: state-driven expressions + per-state animation
     update_face(now);
     update_hardware(now);
-    pet::statsTick(now, asleep || M5.Power.isCharging());
-    if (pet::consumeLevelUp()) pet::react(pet::React::Hop);  // celebrate level-up
+    if (pet::consumeLevelUp()) pet::react(pet::React::Hop);  // celebrate level-up (server-driven)
 
     static uint32_t last_status = 0;
     if (now - last_status > 1000) {

@@ -8,6 +8,12 @@ pub enum ClientMessage {
     Hello(ClientHello),
     ToolResult(ToolResult),
     Status(DeviceStatus),
+    Event(DeviceEvent),
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DeviceEvent {
+    pub kind: String, // e.g. "head_pat"
 }
 
 #[derive(Debug, Deserialize)]
@@ -15,6 +21,8 @@ pub struct DeviceStatus {
     pub battery: Option<i32>,
     pub charging: Option<bool>,
     pub volume: Option<i32>,
+    /// device-reported current appearance selection {hair,costume,blush,glasses}
+    pub appearance: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -56,8 +64,21 @@ pub enum ServerMessage {
     Error(ErrorMessage),
     /// Actuator command for the device (volume / led / turn).
     Control(ControlMessage),
+    /// Server-authoritative state pushed to the device (growth + appearance).
+    Sync(SyncState),
     /// Sent after all streamed audio for a reply has been pushed.
     SpeakDone,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SyncState {
+    pub gender: String,
+    pub appearance: serde_json::Value,
+    pub level: i32,
+    pub xp: i32,
+    pub xp_need: i32,
+    pub bond: i32,
+    pub energy: i32,
 }
 
 #[derive(Debug, Serialize)]

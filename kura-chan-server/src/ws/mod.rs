@@ -81,7 +81,7 @@ pub async fn ws_upgrade(
     Ok(ws.on_upgrade(move |socket| handle_socket(socket, device_id, actor, state)))
 }
 
-async fn handle_socket(socket: WebSocket, device_id: String, actor: Actor, state: Arc<AppState>) {
+async fn handle_socket(socket: WebSocket, device_id: String, mut actor: Actor, state: Arc<AppState>) {
     let (mut sender, mut receiver) = socket.split();
 
     // Outbound channel + writer task. The receive loop and background tasks
@@ -112,6 +112,9 @@ async fn handle_socket(socket: WebSocket, device_id: String, actor: Actor, state
     let system_prompt = format!("{}\n\n{}", persona_full.trim(), rules);
     let session_ttl = state.config.session.idle_new_session_secs as i64;
 
+    // push server-authoritative state to the device on connect
+    send_event(&tx, sync_msg(&actor)).await;
+
     while let Some(msg) = receiver.next().await {
         let msg = match msg {
             Ok(m) => m,
@@ -126,7 +129,21 @@ async fn handle_socket(socket: WebSocket, device_id: String, actor: Actor, state
                 let events = match serde_json::from_str::<ClientMessage>(&text) {
                     Ok(ClientMessage::Hello(hello)) => session.handle_hello(hello),
                     Ok(ClientMessage::ToolResult(result)) => session.handle_tool_result(result),
-                    Ok(ClientMessage::Status(status)) => session.handle_status(status),
+                    Ok(ClientMessage::Status(status)) => {
+                        if let Some(ap) = &status.appearance {
+                            db::set_appearance(&state.db, &actor.actor_id, ap).await;
+                        }
+                        session.handle_status(status)
+                    }
+                    Ok(ClientMessage::Event(ev)) => {
+                        if ev.kind == "head_pat" {
+                            if let Some(a) = db::bump_growth(&state.db, &actor.actor_id, 3, 3, 0).await {
+                                actor = a;
+                                send_event(&tx, sync_msg(&actor)).await;
+                            }
+                        }
+                        vec![]
+                    }
                     Err(e) => {
                         tracing::warn!(error = %e, "Invalid JSON message");
                         vec![SessionEvent::SendJson(ServerMessage::Error(ErrorMessage {
@@ -280,6 +297,11 @@ async fn handle_socket(socket: WebSocket, device_id: String, actor: Actor, state
                         db::log_message(&state.db, &conv_session, &actor.actor_id, "assistant", &reply_text).await;
                     }
                     db::touch_session(&state.db, &conv_session).await;
+                    // server-authoritative growth: a completed turn earns xp/bond, costs energy
+                    if let Some(a) = db::bump_growth(&state.db, &actor.actor_id, 12, 2, -4).await {
+                        actor = a;
+                        send_event(&tx, sync_msg(&actor)).await;
+                    }
                     if want_new_session {
                         if let Ok(sid) = db::new_session(&state.db, &actor.actor_id).await {
                             tracing::info!(actor = %actor.actor_id, session = %sid, "new session (agent requested)");
@@ -511,4 +533,17 @@ async fn speak_phrase(
 async fn send_event(tx: &crate::registry::DeviceTx, event: SessionEvent) {
     // Hand the event to the per-device writer task (non-blocking).
     let _ = tx.send(event);
+}
+
+/// Build a Sync event from the actor's current server-authoritative state.
+fn sync_msg(a: &Actor) -> SessionEvent {
+    SessionEvent::SendJson(ServerMessage::Sync(SyncState {
+        gender: a.gender.clone(),
+        appearance: a.appearance.clone(),
+        level: a.level,
+        xp: a.xp,
+        xp_need: db::xp_need(a.level),
+        bond: a.bond,
+        energy: a.energy,
+    }))
 }
