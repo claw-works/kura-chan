@@ -2,6 +2,7 @@ mod agent_loop;
 mod api;
 mod auth;
 mod config;
+mod db;
 mod error;
 mod harness;
 mod registry;
@@ -36,7 +37,13 @@ async fn main() {
     let config = Config::load().expect("Failed to load configuration");
     let config = Arc::new(config);
 
-    let harness = HarnessClient::new(&config.aws, config.agent.system_prompt.clone()).await;
+    let database_url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://dev:dev@localhost:5432/dev".to_string());
+    let db = db::connect(&database_url).await.expect("DB connect/migrate failed");
+    db::seed_dev(&db).await.ok();
+    tracing::info!("Postgres connected + migrated");
+
+    let harness = HarnessClient::new(&config.aws).await;
     tracing::info!("Harness client initialized");
 
     let stt = build_stt(&config);
@@ -59,6 +66,7 @@ async fn main() {
         registry,
         task_store,
         workflow_store,
+        db,
     });
 
     // Agent loop: slow heartbeat + scheduled-task scheduler (proactive push).

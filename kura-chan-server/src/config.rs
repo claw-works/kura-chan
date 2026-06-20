@@ -63,6 +63,13 @@ pub struct SpeechConfig {
 pub struct SessionConfig {
     pub timeout_seconds: u64,
     pub max_audio_buffer_bytes: usize,
+    /// Idle gap (seconds) after which a new conversation session is started.
+    #[serde(default = "default_idle_new_session")]
+    pub idle_new_session_secs: u64,
+}
+
+fn default_idle_new_session() -> u64 {
+    7200
 }
 
 impl Config {

@@ -10,8 +10,8 @@ use axum::http::HeaderMap;
 use axum::response::Response;
 use futures_util::{SinkExt, StreamExt};
 
-use crate::auth::validate_api_key;
 use crate::config::Config;
+use crate::db::{self, Actor};
 use crate::error::AppError;
 use crate::harness::HarnessClient;
 use crate::harness::invoke::extract_text_delta;
@@ -34,6 +34,8 @@ pub struct AppState {
     pub task_store: Arc<crate::tasks::TaskStore>,
     /// Reusable request templates run through the harness (file-backed).
     pub workflow_store: Arc<crate::workflows::WorkflowStore>,
+    /// Postgres pool (actors / sessions / messages).
+    pub db: crate::db::Db,
 }
 
 /// Phrase played when speech couldn't be transcribed.
@@ -60,19 +62,26 @@ pub async fn ws_upgrade(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Result<Response, AppError> {
-    // Try auth, fallback to "unknown" if headers missing (for debugging)
-    let device_id = validate_api_key(&headers, &state.config.auth)
-        .unwrap_or_else(|e| {
-            tracing::warn!(error = %e, "Auth failed, allowing anyway for debug");
-            "unknown_device".to_string()
-        });
+    let actor = match crate::auth::authenticate(&headers, &state.db).await {
+        Ok(a) => a,
+        Err(e) => {
+            tracing::warn!(error = %e, "Auth failed");
+            return Err(AppError::Auth(e));
+        }
+    };
+    // registry key: the device id sent by the client (tasks reference this), else actor's.
+    let device_id = headers
+        .get("x-device-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .or_else(|| actor.device_id.clone())
+        .unwrap_or_else(|| actor.actor_id.clone());
 
-    tracing::info!(device_id = %device_id, "WebSocket upgrade accepted");
-
-    Ok(ws.on_upgrade(move |socket| handle_socket(socket, device_id, state)))
+    tracing::info!(device_id = %device_id, actor = %actor.actor_id, "WebSocket upgrade accepted");
+    Ok(ws.on_upgrade(move |socket| handle_socket(socket, device_id, actor, state)))
 }
 
-async fn handle_socket(socket: WebSocket, device_id: String, state: Arc<AppState>) {
+async fn handle_socket(socket: WebSocket, device_id: String, actor: Actor, state: Arc<AppState>) {
     let (mut sender, mut receiver) = socket.split();
 
     // Outbound channel + writer task. The receive loop and background tasks
@@ -96,6 +105,12 @@ async fn handle_socket(socket: WebSocket, device_id: String, state: Arc<AppState
     });
 
     let mut session = Session::new(device_id.clone(), state.config.clone());
+
+    // per-actor system prompt = name + persona prefix + common rules (from config)
+    let rules = state.config.agent.system_prompt.clone();
+    let persona_full = format!("你的名字是{}。{}", actor.name, actor.persona.trim());
+    let system_prompt = format!("{}\n\n{}", persona_full.trim(), rules);
+    let session_ttl = state.config.session.idle_new_session_secs as i64;
 
     while let Some(msg) = receiver.next().await {
         let msg = match msg {
@@ -166,11 +181,17 @@ async fn handle_socket(socket: WebSocket, device_id: String, state: Arc<AppState
                         continue;
                     }
 
+                    // Resolve the actor's conversation session (rolls over after idle TTL).
+                    let conv_session = db::get_or_create_session(&state.db, &actor.actor_id, session_ttl)
+                        .await
+                        .unwrap_or_else(|_| session.session_id.clone());
+                    db::log_message(&state.db, &conv_session, &actor.actor_id, "user", &stt_text).await;
+
                     // Stream the harness reply: synthesize + send sentence by sentence.
                     let user_message = session.build_user_message(&stt_text);
                     let mut output = match state
                         .harness
-                        .invoke_stream(&user_message, &session.session_id)
+                        .invoke_stream(&user_message, &conv_session, &actor.actor_id, &system_prompt)
                         .await
                     {
                         Ok(o) => o,
@@ -192,6 +213,8 @@ async fn handle_socket(socket: WebSocket, device_id: String, state: Arc<AppState
 
                     let mut buf = String::new();
                     let mut new_tasks: Vec<crate::tasks::ScheduledTask> = Vec::new();
+                    let mut reply_text = String::new();
+                    let mut want_new_session = false;
                     let mut first = true;
                     let mut sent_any = false;
                     loop {
@@ -199,13 +222,14 @@ async fn handle_socket(socket: WebSocket, device_id: String, state: Arc<AppState
                             Ok(Some(event)) => {
                                 if let Some(t) = extract_text_delta(&event) {
                                     buf.push_str(&t);
-                                    for msg in extract_tags(&mut buf, &device_id, &mut new_tasks) {
+                                    for msg in extract_tags(&mut buf, &device_id, &mut new_tasks, &mut want_new_session) {
                                         send_event(&tx, SessionEvent::SendJson(msg)).await;
                                     }
                                     while let Some(cut) = split_sentence(&buf) {
                                         let seg: String = buf.drain(..cut).collect();
                                         let seg = seg.trim();
                                         if !seg.is_empty() && !seg.contains("[NOISE]") {
+                                            reply_text.push_str(seg);
                                             let audio =
                                                 state.tts.synthesize(seg).await.unwrap_or_default();
                                             if !audio.is_empty() {
@@ -225,11 +249,12 @@ async fn handle_socket(socket: WebSocket, device_id: String, state: Arc<AppState
                         }
                     }
                     // flush trailing text
-                    for msg in extract_tags(&mut buf, &device_id, &mut new_tasks) {
+                    for msg in extract_tags(&mut buf, &device_id, &mut new_tasks, &mut want_new_session) {
                         send_event(&tx, SessionEvent::SendJson(msg)).await;
                     }
                     let rest = buf.trim().to_string();
                     if !rest.is_empty() && !rest.contains("[NOISE]") {
+                        reply_text.push_str(&rest);
                         let audio = state.tts.synthesize(&rest).await.unwrap_or_default();
                         if !audio.is_empty() {
                             send_audio_stream(&tx, &audio, first).await;
@@ -248,6 +273,17 @@ async fn handle_socket(socket: WebSocket, device_id: String, state: Arc<AppState
                         let id = t.id.clone();
                         state.task_store.add(t);
                         tracing::info!(task = %id, device = %device_id, "task created via voice");
+                    }
+                    // log assistant reply + roll session activity / reset
+                    let reply_text = reply_text.trim().to_string();
+                    if !reply_text.is_empty() {
+                        db::log_message(&state.db, &conv_session, &actor.actor_id, "assistant", &reply_text).await;
+                    }
+                    db::touch_session(&state.db, &conv_session).await;
+                    if want_new_session {
+                        if let Ok(sid) = db::new_session(&state.db, &actor.actor_id).await {
+                            tracing::info!(actor = %actor.actor_id, session = %sid, "new session (agent requested)");
+                        }
                     }
                     send_event(&tx, SessionEvent::SendJson(ServerMessage::SpeakDone))
                         .await;
@@ -301,6 +337,7 @@ fn extract_tags(
     buf: &mut String,
     device_id: &str,
     tasks: &mut Vec<crate::tasks::ScheduledTask>,
+    new_session: &mut bool,
 ) -> Vec<ServerMessage> {
     let mut out = Vec::new();
     let mut search = 0;
@@ -311,7 +348,9 @@ fn extract_tags(
         let close = open + crel;
         let inner = buf[open + 1..close].trim().to_string();
         if let Some(rest) = inner.strip_prefix("do:") {
-            if let Some(msg) = parse_do(rest) {
+            if rest.trim() == "newsession" {
+                *new_session = true;
+            } else if let Some(msg) = parse_do(rest) {
                 out.push(msg);
             }
             buf.replace_range(open..close + 1, "");
@@ -414,10 +453,15 @@ fn grab_num(s: &str, key: &str) -> Option<u64> {
 fn parse_do(s: &str) -> Option<ServerMessage> {
     let (key, val) = s.split_once('=')?;
     let (key, val) = (key.trim(), val.trim());
+    let on = |v: &str| if v == "on" || v == "1" || v == "true" { 1 } else { 0 };
     let msg = match key {
-        "volume" => ControlMessage { action: "volume".into(), value: val.parse().ok(), color: None, dir: None },
-        "led" => ControlMessage { action: "led".into(), value: None, color: Some(val.to_string()), dir: None },
-        "turn" => ControlMessage { action: "turn".into(), value: None, color: None, dir: Some(val.to_string()) },
+        "volume" => ControlMessage { action: "volume".into(), value: val.parse().ok(), color: None, dir: None, name: None },
+        "led" => ControlMessage { action: "led".into(), value: None, color: Some(val.to_string()), dir: None, name: None },
+        "turn" => ControlMessage { action: "turn".into(), value: None, color: None, dir: Some(val.to_string()), name: None },
+        "wear" => ControlMessage { action: "wear".into(), value: None, color: None, dir: None, name: Some(val.to_string()) },
+        "blush" => ControlMessage { action: "blush".into(), value: Some(on(val)), color: None, dir: None, name: None },
+        "glasses" => ControlMessage { action: "glasses".into(), value: Some(on(val)), color: None, dir: None, name: None },
+        "char" => ControlMessage { action: "char".into(), value: None, color: None, dir: None, name: Some(val.to_string()) },
         _ => return None,
     };
     Some(ServerMessage::Control(msg))

@@ -3,3 +3,5 @@
 # Real device config (wifi pass / server) — never commit. Use config.example.json
 # as the template; copy to config.json locally and `pio run -t uploadfs`.
 data/config.json
+# Device-resolution assets are generated from pet/ masters via tools/build_assets.py
+data/pet/

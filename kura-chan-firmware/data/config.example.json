@@ -1,7 +1,10 @@
 {
   "_comment": "Template. Copy to config.json (gitignored), fill real values, then `pio run -t uploadfs`. Do NOT put real wifi passwords / server in this committed file.",
   "wifi": [
-    { "ssid": "YOUR_WIFI_SSID", "pass": "YOUR_WIFI_PASSWORD" }
+    {
+      "ssid": "YOUR_WIFI_SSID",
+      "pass": "YOUR_WIFI_PASSWORD"
+    }
   ],
   "server": {
     "host": "YOUR_SERVER_HOST",
@@ -22,5 +25,8 @@
   },
   "audio": {
     "prebuffer_ms": 2000
+  },
+  "pet": {
+    "character": "muxue"
   }
 }

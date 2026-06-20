@@ -5,16 +5,14 @@
 #include <M5Unified.h>
 #include <WiFi.h>
 #include <WiFiUdp.h>
+#include <SPI.h>
+#include <SD.h>
 #include <ArduinoJson.h>
 #include <WebSocketsClient.h>
 #include "config/config_store.h"
 #include "SCSCL.h"
 #include <math.h>
-#include <Avatar.h>
-#include <faces/FaceTemplates.hpp>
-
-// m5stack-avatar runs its own render task and owns the LCD once init()'d.
-static m5avatar::Avatar avatar;
+#include "pet/pet.h"
 
 // ===================== Hardware: servo (SCS bus) + RGB LED (PY32) =====================
 namespace hw {
@@ -116,6 +114,7 @@ static void init() {
 }  // namespace hw
 
 static WiFiUDP udp_dbg;
+static String g_sd_report = "SD: (not probed)";
 static void dbg(const char* tag);
 
 // === Face geometry ===
@@ -228,7 +227,7 @@ static String current_emotion = "neutral";
 static bool face_dirty = false;
 
 // === Idle sleep ===
-static constexpr uint32_t SLEEP_AFTER_MS = 60000;  // grace before sleeping when awake-idle (boot/reconnect)
+static constexpr uint32_t SLEEP_AFTER_MS = 120000;  // idle (awake) time before sleeping; counts from last activity / speak-done
 static constexpr uint8_t AWAKE_BRIGHTNESS = 128;
 static constexpr uint8_t SLEEP_BRIGHTNESS = 6;
 static uint32_t last_activity_ms = 0;
@@ -373,42 +372,19 @@ enum class FaceMode { Sleep, Idle, Listen, Think, Speak };
 static FaceMode face_mode = FaceMode::Idle;
 static FaceMode last_face = (FaceMode)-1;
 
-static m5avatar::Expression emotion_to_expression() {
-    if (current_emotion == "happy" || current_emotion == "love") return m5avatar::Expression::Happy;
-    if (current_emotion == "sad") return m5avatar::Expression::Sad;
-    if (current_emotion == "angry") return m5avatar::Expression::Angry;
-    if (current_emotion == "confused" || current_emotion == "surprised") return m5avatar::Expression::Doubt;
-    return m5avatar::Expression::Neutral;
-}
-
-// Drive the m5stack-avatar from system state. Keeps the original name so all
-// existing call sites work unchanged. The avatar's own task handles blink/breath.
+// Drive the procedural pet character from system state.
 static void update_face(uint32_t now) {
     (void)now;
-    static m5avatar::Expression lastExp = m5avatar::Expression::Neutral;
     static bool wasAsleep = false;
-    static float lastMouth = -1.0f;
-
     if (asleep != wasAsleep) {
         wasAsleep = asleep;
         M5.Display.setBrightness(asleep ? SLEEP_BRIGHTNESS : AWAKE_BRIGHTNESS);
     }
-
-    m5avatar::Expression exp;
-    if (asleep) {
-        exp = m5avatar::Expression::Sleepy;
-    } else {
-        switch (audio_state) {
-            case AudioState::Listening: exp = m5avatar::Expression::Neutral; break;
-            case AudioState::Waiting:   exp = m5avatar::Expression::Doubt;   break;  // thinking
-            default:                    exp = emotion_to_expression();       break;  // idle/speaking -> mood
-        }
-    }
-    if (exp != lastExp) { avatar.setExpression(exp); lastExp = exp; }
-
-    // lip-sync: open mouth only while audio is actually playing
-    float mouth = (audio_state == AudioState::Speaking && M5.Speaker.isPlaying()) ? 0.7f : 0.0f;
-    if (mouth != lastMouth) { avatar.setMouthOpenRatio(mouth); lastMouth = mouth; }
+    pet::setAsleep(asleep);
+    pet::setListening(audio_state == AudioState::Listening);
+    pet::setThinking(audio_state == AudioState::Waiting);
+    pet::setSpeaking(audio_state == AudioState::Speaking && M5.Speaker.isPlaying());
+    pet::setMoodByName(current_emotion.c_str());
 }
 
 // === Hardware (LED + servo) driven by state + emotion ===
@@ -472,7 +448,7 @@ static void update_hardware(uint32_t now) {
         }
         case AudioState::Speaking:
             yaw = (int)(6 * sinf(t * 1.1f)); pitch = 4 + (int)(4 * sinf(t * 3.5f)); break;  // gentle up-bob
-        default: yaw = 0; pitch = 0; break;                          // idle center/level
+        default: yaw = 0; pitch = 8; break;                          // idle: head raised a little
     }
     hw::look(yaw, pitch, 300);
 }
@@ -672,6 +648,16 @@ static void handleServerJson(uint8_t* payload, size_t length) {
             else if (strcmp(d, "center") == 0) { man_yaw_set = true; man_yaw_deg = 0; man_pitch_set = true; man_pitch_deg = 0; }
             else if (strcmp(d, "nod") == 0)    { gesture = 1; gesture_start = millis(); }
             else if (strcmp(d, "shake") == 0)  { gesture = 2; gesture_start = millis(); }
+        } else if (strcmp(action, "wear") == 0) {
+            const char* n = doc["name"];
+            if (n) pet::wear(n);                       // change outfit/hair variant
+        } else if (strcmp(action, "blush") == 0) {
+            pet::setBlush((int)(doc["value"] | 0) != 0);
+        } else if (strcmp(action, "glasses") == 0) {
+            pet::setAccessory((int)(doc["value"] | 0) != 0);
+        } else if (strcmp(action, "char") == 0) {
+            const char* n = doc["name"];
+            if (n) pet::setCharacter(n);
         }
     } else if (strcmp(type, "tool_call") == 0) {
         const char* call_id = doc["call_id"];
@@ -751,8 +737,38 @@ void setup() {
     }
     head_touch_init();
     hw::init();
-    avatar.init(8);   // start avatar render task (owns the LCD); 8-bit color
-    avatar.setFace(new m5avatar::DoggyFace());
+    // ---- SD (TF) probe BEFORE the render task starts (shared SPI bus is free) ----
+    {
+        int sck = M5.getPin(m5::pin_name_t::sd_spi_sclk);
+        int miso = M5.getPin(m5::pin_name_t::sd_spi_miso);
+        int mosi = M5.getPin(m5::pin_name_t::sd_spi_mosi);
+        int cs = M5.getPin(m5::pin_name_t::sd_spi_cs);
+        char buf[280];
+        SPI.begin(sck, miso, mosi, cs);
+        bool ok = SD.begin(cs, SPI, 20000000);
+        if (!ok) {
+            snprintf(buf, sizeof buf, "SD mount FAIL pins sck=%d miso=%d mosi=%d cs=%d", sck, miso, mosi, cs);
+        } else {
+            uint8_t t = SD.cardType();
+            uint64_t mb = SD.cardSize() / (1024ULL * 1024ULL);
+            int n = 0; String names;
+            File root = SD.open("/");
+            if (root) {
+                File f;
+                while ((f = root.openNextFile())) {
+                    if (n < 10) names += String(f.name()) + (f.isDirectory() ? "/ " : " ");
+                    n++; f.close();
+                }
+                root.close();
+            }
+            snprintf(buf, sizeof buf, "SD ok type=%u size=%lluMB entries=%d [%s] (sck=%d cs=%d)",
+                     t, (unsigned long long)mb, n, names.c_str(), sck, cs);
+        }
+        g_sd_report = buf;
+        Serial.println(buf);
+    }
+    pet::init(configStore.getPetCharacter().c_str());   // image-based pet renderer (loads /pet/<char>/ from SD)
+    pet::statsBegin();  // load growth state + set appearance level
 
     // Allocate audio buffers in PSRAM
     rec_buf = (int16_t*)heap_caps_malloc(REC_MAX_SAMPLES * sizeof(int16_t), MALLOC_CAP_SPIRAM);
@@ -809,6 +825,13 @@ void setup() {
                     configStore.getServerPort(),
                     configStore.getServerPath().c_str());
     last_activity_ms = millis();
+
+    // ---- report SD probe result via UDP (now that WiFi is up) ----
+    if (WiFi.status() == WL_CONNECTED) {
+        udp_dbg.beginPacket(IPAddress(192, 168, 31, 249), 8089);
+        udp_dbg.print(g_sd_report);
+        udp_dbg.endPacket();
+    }
 }
 
 void loop() {
@@ -824,6 +847,7 @@ void loop() {
     static bool prev_talk = false;
     bool tap = talk && !prev_talk;        // rising edge = a fresh tap
     prev_talk = talk;
+    if (tap) pet::onHeadPat();            // head pat -> bond + xp
     bool started_now = false;
     static bool stop_req = false;
 
@@ -905,6 +929,7 @@ void loop() {
     // Streaming playback: first audio frame switches mic→speaker
     if (speaker_pending) {
         speaker_pending = false;
+        asleep = false;          // incoming audio (reply or proactive push) wakes the device
         last_activity_ms = now;  // AI answer arriving → reset idle/sleep timer
         dbg("PLAY");
         M5.Mic.end();
@@ -931,12 +956,12 @@ void loop() {
             play_pos += piece;
             last_activity_ms = now;
         }
-        // reply fully played → follow-up listen window
+        // reply fully played → go idle; the sleep countdown starts from NOW
         if (server_done && play_pos >= play_bytes && !M5.Speaker.isPlaying()) {
             dbg("SPKDONE");
-            last_activity_ms = now;
-            // hold-to-talk: answer done -> sleep; touch & hold to ask again
-            go_to_sleep();
+            pet::onInteraction();   // completed conversation turn -> xp + bond
+            audio_state = AudioState::Idle;   // stay awake, idle
+            last_activity_ms = now;           // idle timer starts only now
             draw_status_bar();
         }
     }
@@ -964,6 +989,8 @@ void loop() {
     // Face: state-driven expressions + per-state animation
     update_face(now);
     update_hardware(now);
+    pet::statsTick(now, asleep || M5.Power.isCharging());
+    if (pet::consumeLevelUp()) pet::react(pet::React::Hop);  // celebrate level-up
 
     static uint32_t last_status = 0;
     if (now - last_status > 1000) {

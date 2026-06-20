@@ -18,6 +18,7 @@ void ConfigStore::loadDefaults_() {
     deviceId_ = "KURA_CHAN_001";
     vad_ = {2.0f, 1.4f, 150, 700, 6000, 3};
     audio_ = {2000};
+    petChar_ = "mixue";
 }
 
 void ConfigStore::begin() {
@@ -67,6 +68,7 @@ bool ConfigStore::load_() {
     vad_.min_run = doc["vad"]["min_run"] | vad_.min_run;
 
     audio_.prebuffer_ms = doc["audio"]["prebuffer_ms"] | audio_.prebuffer_ms;
+    petChar_ = doc["pet"]["character"] | petChar_;
     return true;
 }
 
@@ -90,6 +92,7 @@ bool ConfigStore::save_() {
     doc["vad"]["no_speech_ms"] = vad_.no_speech_ms;
     doc["vad"]["min_run"] = vad_.min_run;
     doc["audio"]["prebuffer_ms"] = audio_.prebuffer_ms;
+    doc["pet"]["character"] = petChar_;
 
     File f = LittleFS.open(CFG_PATH, "w");
     if (!f) {
@@ -119,6 +122,7 @@ String ConfigStore::getApiKey() { return apiKey_; }
 String ConfigStore::getDeviceId() { return deviceId_; }
 VadConfig ConfigStore::getVad() { return vad_; }
 AudioConfig ConfigStore::getAudio() { return audio_; }
+String ConfigStore::getPetCharacter() { return petChar_; }
 
 void ConfigStore::setServerHost(const String& host) { srvHost_ = host; save_(); Serial.printf("[Config] Server host: %s\n", host.c_str()); }
 void ConfigStore::setServerPort(uint16_t port) { srvPort_ = port; save_(); Serial.printf("[Config] Server port: %d\n", port); }

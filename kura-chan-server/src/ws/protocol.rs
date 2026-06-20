@@ -69,6 +69,8 @@ pub struct ControlMessage {
     pub color: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dir: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

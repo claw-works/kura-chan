@@ -41,6 +41,7 @@ public:
 
     VadConfig getVad();
     AudioConfig getAudio();
+    String getPetCharacter();
 
     void setServerHost(const String& host);
     void setServerPort(uint16_t port);
@@ -59,6 +60,7 @@ private:
     uint16_t srvPort_ = 8866;
     VadConfig vad_{};
     AudioConfig audio_{};
+    String petChar_;
 };
 
 extern ConfigStore configStore;

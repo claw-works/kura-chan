@@ -32,5 +32,5 @@ if [ ! -x "$BIN" ]; then
   cargo build --release
 fi
 
-echo "[run] 启动 $BIN （监听 0.0.0.0:8080，AWS_REGION=$AWS_REGION）"
+echo "[run] starting $BIN (listen 0.0.0.0:8080, AWS_REGION=${AWS_REGION})"
 exec "$BIN"

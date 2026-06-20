@@ -1,8 +1,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use uuid::Uuid;
-
 use crate::harness::invoke::extract_text_delta;
 use crate::tasks::{now_unix, ScheduledTask, TaskAction};
 use crate::ws::codec::{AudioFrame, AUDIO_OUTPUT, FLAG_START};
@@ -68,14 +66,14 @@ async fn process_due_tasks(state: &Arc<AppState>) {
 async fn execute(state: &Arc<AppState>, task: &ScheduledTask) -> Result<(), String> {
     let text = match &task.action {
         TaskAction::Say { text } => text.clone(),
-        TaskAction::AgentPrompt { prompt } => run_agent(state, prompt).await?,
+        TaskAction::AgentPrompt { prompt } => run_agent(state, &task.device_id, prompt).await?,
         TaskAction::Workflow { name, params } => {
             let wf = state
                 .workflow_store
                 .get(name)
                 .ok_or_else(|| format!("unknown workflow: {name}"))?;
             let prompt = wf.render(params);
-            run_agent(state, &prompt).await?
+            run_agent(state, &task.device_id, &prompt).await?
         }
     };
     let text = text.trim();
@@ -86,12 +84,22 @@ async fn execute(state: &Arc<AppState>, task: &ScheduledTask) -> Result<(), Stri
     Ok(())
 }
 
-/// Run a prompt through the harness and collect the full reply text.
-async fn run_agent(state: &Arc<AppState>, prompt: &str) -> Result<String, String> {
-    let session_id = format!("task_{}", Uuid::new_v4().simple());
+/// Run a prompt through the harness as the device's actor (so memory + session
+/// are unified with normal conversation), collect the full reply, log it.
+async fn run_agent(state: &Arc<AppState>, device_id: &str, prompt: &str) -> Result<String, String> {
+    let actor = crate::db::actor_by_device(&state.db, device_id)
+        .await
+        .ok_or_else(|| format!("no actor for device {device_id}"))?;
+    let ttl = state.config.session.idle_new_session_secs as i64;
+    let session = crate::db::get_or_create_session(&state.db, &actor.actor_id, ttl)
+        .await
+        .map_err(|e| e.to_string())?;
+    let rules = state.config.agent.system_prompt.clone();
+    let persona_full = format!("你的名字是{}。{}", actor.name, actor.persona.trim());
+    let sp = format!("{}\n\n{}", persona_full.trim(), rules);
     let mut output = state
         .harness
-        .invoke_stream(prompt, &session_id)
+        .invoke_stream(prompt, &session, &actor.actor_id, &sp)
         .await
         .map_err(|e| format!("{e:?}"))?;
     let mut buf = String::new();
@@ -106,7 +114,24 @@ async fn run_agent(state: &Arc<AppState>, prompt: &str) -> Result<String, String
             Err(e) => return Err(e.to_string()),
         }
     }
-    Ok(buf)
+    let clean = strip_tags(&buf);
+    if !clean.is_empty() {
+        crate::db::log_message(&state.db, &session, &actor.actor_id, "assistant", &clean).await;
+        crate::db::touch_session(&state.db, &session).await;
+    }
+    Ok(clean)
+}
+
+/// Remove any [..] markers (mood/do/task) so proactive speech isn't read aloud.
+fn strip_tags(s: &str) -> String {
+    let mut out = String::new();
+    let mut depth = 0i32;
+    for c in s.chars() {
+        if c == '[' { depth += 1; }
+        else if c == ']' { if depth > 0 { depth -= 1; } }
+        else if depth == 0 { out.push(c); }
+    }
+    out.trim().to_string()
 }
 
 /// Proactively speak text to a connected device: TTS + push as a full turn
