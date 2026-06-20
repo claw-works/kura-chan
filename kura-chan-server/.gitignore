@@ -4,3 +4,4 @@ kura-server.env
 # runtime state (regenerated)
 /tasks.json
 /workflows.json
+/assets/.cache/

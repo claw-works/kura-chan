@@ -13,6 +13,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/register", axum::routing::post(api::register))
         .route("/me", axum::routing::put(api::update_me))
         .route("/session/reset", axum::routing::post(api::reset_session))
+        .route("/assets/{gender}", get(crate::assets::list_assets))
+        .route("/assets/{gender}/{file}", get(crate::assets::get_asset))
         .route("/tasks", get(api::list_tasks).post(api::create_task))
         .route("/tasks/{id}", delete(api::delete_task))
         .route("/workflows", get(api::list_workflows).post(api::upsert_workflow))

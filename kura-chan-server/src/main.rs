@@ -1,5 +1,6 @@
 mod agent_loop;
 mod api;
+mod assets;
 mod auth;
 mod config;
 mod db;
