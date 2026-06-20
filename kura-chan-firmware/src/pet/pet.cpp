@@ -361,9 +361,26 @@ static void loadScene() {
     sceneActive = false;
     if (g_bg[0] == 0) { sceneBg.deleteSprite(); return; }
     String path = String("/pet/cache/bg/") + g_bg + ".png";
-    if (!SD.exists(path) && g_host[0] && WiFi.status() == WL_CONNECTED) {
+    bool online = g_host[0] && WiFi.status() == WL_CONNECTED;
+    String url = String("http://") + g_host + ":" + g_port + "/assets/bg/" + g_bg + ".png?h=" + String(SCR_H);
+    bool needDownload = !SD.exists(path);
+    if (online && !needDownload) {
+        // validate the cached file size against the server so edited/renamed bg refresh automatically
+        HTTPClient hh;
+        hh.setConnectTimeout(4000); hh.setTimeout(6000);
+        hh.begin(url);
+        int code = hh.sendRequest("HEAD");
+        int remoteLen = hh.getSize();
+        hh.end();
+        if (code == 200 && remoteLen > 0) {
+            File f = SD.open(path, FILE_READ);
+            long localLen = f ? (long)f.size() : -1;
+            if (f) f.close();
+            if (localLen != remoteLen) needDownload = true;
+        }
+    }
+    if (needDownload && online) {
         SD.mkdir("/pet"); SD.mkdir("/pet/cache"); SD.mkdir("/pet/cache/bg");
-        String url = String("http://") + g_host + ":" + g_port + "/assets/bg/" + g_bg + ".png?h=" + String(SCR_H);
         HTTPClient h;
         h.setConnectTimeout(5000); h.setTimeout(8000);
         h.begin(url);
@@ -411,8 +428,8 @@ static void renderFrame(uint32_t now) {
     if (g_needLoad) {
         g_needLoad = false;
         scanAssets();
-        if (slotVarN[S_BODY] == 0 && !g_downloadTried && WiFi.status() == WL_CONNECTED) {
-            g_downloadTried = true;   // cache empty -> fetch from server, then reload
+        if (!g_downloadTried && WiFi.status() == WL_CONNECTED) {
+            g_downloadTried = true;   // once per boot: pull list + download any missing files, then reload
             g_needDownload = true;
         } else {
             if (g_pendingAppearance.length()) {
