@@ -179,3 +179,144 @@ async fn render_png(src: String, h: u32) -> Result<Vec<u8>, String> {
     .await
     .map_err(|e| e.to_string())?
 }
+
+
+// ===== Pre-composited character art (RGB565 + alpha8) =====
+// The device used to fetch each layer and composite locally onto an opaque
+// "baked" body — which couldn't move independently of the background (the
+// breathing bob dragged the baked-in background → tearing). Now the server
+// composites all body layers at native resolution, scales ONCE, and emits
+// RGB565+A8 so the device renders a single transparent sprite over a fixed
+// background. Compositing before scaling avoids per-layer sub-pixel drift.
+
+#[derive(Deserialize)]
+pub struct CompositeQ {
+    pub hair_back: Option<String>,
+    pub hair_front: Option<String>,
+    pub body: Option<String>,
+    pub costume: Option<String>,
+    pub blush: Option<String>,
+    pub glasses: Option<u8>,
+    pub h: Option<u32>,
+}
+
+/// Resolve a stem to an actual source file (png/webp/jpg master), if present.
+fn resolve_src(gender: &str, stem: &str) -> Option<String> {
+    for ext in [".png", ".webp", ".jpg", ".jpeg", ".PNG", ".WEBP", ".JPG"] {
+        let p = format!("{ASSET_DIR}/{gender}/{stem}{ext}");
+        if std::path::Path::new(&p).exists() {
+            return Some(p);
+        }
+    }
+    None
+}
+
+/// RGB565 (big-endian) + A8 interleaved, 8-byte header: "KRA1" w:u16 h:u16 (BE).
+fn encode_rgb565a8(img: &image::RgbaImage) -> Vec<u8> {
+    let (w, h) = img.dimensions();
+    let mut out = Vec::with_capacity(8 + (w * h * 3) as usize);
+    out.extend_from_slice(b"KRA1");
+    out.extend_from_slice(&(w as u16).to_be_bytes());
+    out.extend_from_slice(&(h as u16).to_be_bytes());
+    for px in img.pixels() {
+        let [r, g, b, a] = px.0;
+        let c: u16 = (((r as u16) & 0xF8) << 8) | (((g as u16) & 0xFC) << 3) | ((b as u16) >> 3);
+        out.extend_from_slice(&c.to_be_bytes());
+        out.push(a);
+    }
+    out
+}
+
+/// Composite the given layer stems at native resolution (alpha overlay in
+/// order), scale once to height `h`, encode RGB565+A8. Missing optional layers
+/// are skipped.
+fn composite_and_encode(gender: &str, stems: &[String], h: u32) -> Result<Vec<u8>, String> {
+    use image::imageops;
+    let mut base: Option<image::RgbaImage> = None;
+    for stem in stems {
+        let src = match resolve_src(gender, stem) {
+            Some(p) => p,
+            None => continue,
+        };
+        let layer = image::open(&src).map_err(|e| e.to_string())?.to_rgba8();
+        match base.as_mut() {
+            None => base = Some(layer),
+            Some(b) => imageops::overlay(b, &layer, 0, 0),
+        }
+    }
+    let mut img = base.ok_or_else(|| "no layers resolved".to_string())?;
+    if h > 0 && img.height() != h {
+        let (w0, h0) = img.dimensions();
+        let nw = ((w0 as f32) * (h as f32 / h0 as f32)).round().max(1.0) as u32;
+        img = imageops::resize(&img, nw, h, imageops::FilterType::Lanczos3);
+    }
+    Ok(encode_rgb565a8(&img))
+}
+
+/// GET /assets/composite/{gender}?hair_back=&hair_front=&body=&costume=&blush=&glasses=1&h=240
+/// Returns the composited character sprite (body layers, no face) as RGB565+A8.
+pub async fn get_composite(
+    Path(gender): Path<String>,
+    Query(q): Query<CompositeQ>,
+) -> impl IntoResponse {
+    if !safe_seg(&gender) {
+        return (StatusCode::BAD_REQUEST, "bad gender").into_response();
+    }
+    let body = q.body.clone().unwrap_or_else(|| "base".into());
+    let mut stems: Vec<String> = Vec::new();
+    if let Some(v) = q.hair_back.as_deref().filter(|s| !s.is_empty()) {
+        stems.push(format!("10_hair_back_{v}"));
+    }
+    stems.push(format!("20_body_{body}"));
+    if let Some(v) = q.blush.as_deref().filter(|s| !s.is_empty()) {
+        stems.push(format!("30_blush_{v}"));
+    }
+    if let Some(v) = q.costume.as_deref().filter(|s| !s.is_empty()) {
+        stems.push(format!("40_costume_{v}"));
+    }
+    if let Some(v) = q.hair_front.as_deref().filter(|s| !s.is_empty()) {
+        stems.push(format!("50_hair_front_{v}"));
+    }
+    if q.glasses.unwrap_or(0) != 0 {
+        stems.push("70_accessory_glasses".to_string());
+    }
+    for s in &stems {
+        if !safe_seg(s) {
+            return (StatusCode::BAD_REQUEST, "bad layer").into_response();
+        }
+    }
+    let h = q.h.unwrap_or(0).min(2000);
+    let gender2 = gender.clone();
+    match tokio::task::spawn_blocking(move || composite_and_encode(&gender2, &stems, h)).await {
+        Ok(Ok(bytes)) => (
+            [(header::CONTENT_TYPE, "application/octet-stream")],
+            bytes,
+        )
+            .into_response(),
+        Ok(Err(e)) => (StatusCode::NOT_FOUND, e).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+/// GET /assets/face/{gender}/{expr}?h=240 -> single face layer as RGB565+A8
+/// (same canvas size as the character so the device overlays it 1:1).
+pub async fn get_face(
+    Path((gender, expr)): Path<(String, String)>,
+    Query(q): Query<SizeQ>,
+) -> impl IntoResponse {
+    if !safe_seg(&gender) || !safe_seg(&expr) {
+        return (StatusCode::BAD_REQUEST, "bad path").into_response();
+    }
+    let stems = vec![format!("60_face_{expr}")];
+    let h = q.h.unwrap_or(0).min(2000);
+    let gender2 = gender.clone();
+    match tokio::task::spawn_blocking(move || composite_and_encode(&gender2, &stems, h)).await {
+        Ok(Ok(bytes)) => (
+            [(header::CONTENT_TYPE, "application/octet-stream")],
+            bytes,
+        )
+            .into_response(),
+        Ok(Err(e)) => (StatusCode::NOT_FOUND, e).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
