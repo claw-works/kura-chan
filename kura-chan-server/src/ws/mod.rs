@@ -112,9 +112,15 @@ async fn handle_socket(socket: WebSocket, device_id: String, mut actor: Actor, s
     let options = crate::assets::options_prompt(&actor.gender);
     let system_prompt = format!("{}\n\n{}\n\n{}", persona_full.trim(), rules, options);
     let session_ttl = state.config.session.idle_new_session_secs as i64;
+    let growth = state.config.growth.clone();
 
-    // push server-authoritative state to the device on connect
-    send_event(&tx, sync_msg(&actor, true)).await;
+    // settle passive energy regen (time since last seen), then push full state on connect
+    if let Some(a) =
+        db::bump_growth(&state.db, &actor.actor_id, 0, 0, 0, growth.xp_base, growth.energy_regen_per_hour).await
+    {
+        actor = a;
+    }
+    send_event(&tx, sync_msg(&actor, true, growth.xp_base)).await;
 
     while let Some(msg) = receiver.next().await {
         let msg = match msg {
@@ -139,12 +145,8 @@ async fn handle_socket(socket: WebSocket, device_id: String, mut actor: Actor, s
                         session.handle_status(status)
                     }
                     Ok(ClientMessage::Event(ev)) => {
-                        if ev.kind == "head_pat" {
-                            if let Some(a) = db::bump_growth(&state.db, &actor.actor_id, 3, 3, 0).await {
-                                actor = a;
-                                send_event(&tx, sync_msg(&actor, false)).await;
-                            }
-                        }
+                        // head_pat is the chat wake trigger only — no growth (too easy to farm)
+                        let _ = ev;
                         vec![]
                     }
                     Err(e) => {
@@ -234,6 +236,7 @@ async fn handle_socket(socket: WebSocket, device_id: String, mut actor: Actor, s
                     let mut buf = String::new();
                     let mut new_tasks: Vec<crate::tasks::ScheduledTask> = Vec::new();
                     let mut appearance_ops: Vec<(String, serde_json::Value)> = Vec::new();
+                    let mut turn_growth = TurnGrowth::default();
                     let mut reply_text = String::new();
                     let mut want_new_session = false;
                     let mut first = true;
@@ -243,7 +246,7 @@ async fn handle_socket(socket: WebSocket, device_id: String, mut actor: Actor, s
                             Ok(Some(event)) => {
                                 if let Some(t) = extract_text_delta(&event) {
                                     buf.push_str(&t);
-                                    for msg in extract_tags(&mut buf, &device_id, &mut new_tasks, &mut want_new_session, &mut appearance_ops) {
+                                    for msg in extract_tags(&mut buf, &device_id, &mut new_tasks, &mut want_new_session, &mut appearance_ops, &mut turn_growth) {
                                         send_event(&tx, SessionEvent::SendJson(msg)).await;
                                     }
                                     while let Some(cut) = split_sentence(&buf) {
@@ -270,7 +273,7 @@ async fn handle_socket(socket: WebSocket, device_id: String, mut actor: Actor, s
                         }
                     }
                     // flush trailing text
-                    for msg in extract_tags(&mut buf, &device_id, &mut new_tasks, &mut want_new_session, &mut appearance_ops) {
+                    for msg in extract_tags(&mut buf, &device_id, &mut new_tasks, &mut want_new_session, &mut appearance_ops, &mut turn_growth) {
                         send_event(&tx, SessionEvent::SendJson(msg)).await;
                     }
                     let rest = buf.trim().to_string();
@@ -305,10 +308,29 @@ async fn handle_socket(socket: WebSocket, device_id: String, mut actor: Actor, s
                     for (k, v) in &appearance_ops {
                         db::set_appearance_key(&state.db, &actor.actor_id, k, v.clone()).await;
                     }
-                    // server-authoritative growth: a completed turn earns xp/bond, costs energy
-                    if let Some(a) = db::bump_growth(&state.db, &actor.actor_id, 12, 2, -4).await {
+                    // server-authoritative growth for a completed turn:
+                    //   xp  = base + sum(event rewards the agent flagged)
+                    //   bond = agent-judged delta from this interaction (clamped)
+                    //   energy = -turn cost (passive regen handled in bump_growth)
+                    let event_xp: i32 =
+                        turn_growth.events.iter().map(|lvl| growth.event_xp(lvl)).sum();
+                    let dxp = growth.base_xp + event_xp;
+                    let dbond = turn_growth
+                        .bond
+                        .clamp(-growth.bond_max_delta, growth.bond_max_delta);
+                    if let Some(a) = db::bump_growth(
+                        &state.db,
+                        &actor.actor_id,
+                        dxp,
+                        dbond,
+                        -growth.turn_energy,
+                        growth.xp_base,
+                        growth.energy_regen_per_hour,
+                    )
+                    .await
+                    {
                         actor = a;
-                        send_event(&tx, sync_msg(&actor, false)).await;
+                        send_event(&tx, sync_msg(&actor, false, growth.xp_base)).await;
                     }
                     if want_new_session {
                         if let Ok(sid) = db::new_session(&state.db, &actor.actor_id).await {
@@ -363,12 +385,22 @@ async fn send_audio_stream(
 /// Remove complete `[do:...]` / `[mood:...]` tags from `buf`, returning the
 /// control/emotion messages to send. Unrecognized tags (e.g. `[NOISE]`) and any
 /// unclosed trailing `[...` are left in place so TTS handling stays correct.
+/// Growth signals the agent emits during a turn (stripped from spoken text).
+#[derive(Default)]
+struct TurnGrowth {
+    /// event level names ([event:minor|major|epic]) -> resolved to XP later
+    events: Vec<String>,
+    /// accumulated intimacy delta from [bond:+N]/[bond:-N]
+    bond: i32,
+}
+
 fn extract_tags(
     buf: &mut String,
     device_id: &str,
     tasks: &mut Vec<crate::tasks::ScheduledTask>,
     new_session: &mut bool,
     apps: &mut Vec<(String, serde_json::Value)>,
+    growth: &mut TurnGrowth,
 ) -> Vec<ServerMessage> {
     let mut out = Vec::new();
     let mut search = 0;
@@ -408,6 +440,16 @@ fn extract_tags(
         } else if let Some(rest) = inner.strip_prefix("task:") {
             if let Some(t) = parse_task(rest, device_id) {
                 tasks.push(t);
+            }
+            buf.replace_range(open..close + 1, "");
+            search = open;
+        } else if let Some(rest) = inner.strip_prefix("event:") {
+            growth.events.push(rest.trim().to_string());
+            buf.replace_range(open..close + 1, "");
+            search = open;
+        } else if let Some(rest) = inner.strip_prefix("bond:") {
+            if let Ok(n) = rest.trim().trim_start_matches('+').parse::<i32>() {
+                growth.bond += n;
             }
             buf.replace_range(open..close + 1, "");
             search = open;
@@ -558,13 +600,13 @@ async fn send_event(tx: &crate::registry::DeviceTx, event: SessionEvent) {
 
 /// Build a Sync event. `full` includes appearance (used on connect to restore);
 /// growth-only syncs omit it so they don't revert a just-applied outfit change.
-fn sync_msg(a: &Actor, full: bool) -> SessionEvent {
+fn sync_msg(a: &Actor, full: bool, xp_base: i32) -> SessionEvent {
     SessionEvent::SendJson(ServerMessage::Sync(SyncState {
         gender: a.gender.clone(),
         appearance: if full { Some(a.appearance.clone()) } else { None },
         level: a.level,
         xp: a.xp,
-        xp_need: db::xp_need(a.level),
+        xp_need: db::xp_need(a.level, xp_base),
         bond: a.bond,
         energy: a.energy,
     }))

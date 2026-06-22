@@ -9,6 +9,8 @@ pub struct Config {
     pub agent: AgentConfig,
     pub speech: SpeechConfig,
     pub session: SessionConfig,
+    #[serde(default)]
+    pub growth: GrowthConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -70,6 +72,64 @@ pub struct SessionConfig {
 
 fn default_idle_new_session() -> u64 {
     7200
+}
+
+/// Growth/raising numeric system. All values tunable without recompiling.
+#[derive(Debug, Deserialize, Clone)]
+pub struct GrowthConfig {
+    /// Base XP earned per completed conversation turn.
+    #[serde(default = "d_base_xp")]
+    pub base_xp: i32,
+    /// Energy spent per turn.
+    #[serde(default = "d_turn_energy")]
+    pub turn_energy: i32,
+    /// XP curve coefficient: xp_need(L) = xp_base * L * (L+1).
+    #[serde(default = "d_xp_base")]
+    pub xp_base: i32,
+    /// Passive energy recovered per real hour (capped at 100).
+    #[serde(default = "d_regen")]
+    pub energy_regen_per_hour: i32,
+    /// Max |bond| change applied per turn (anti-abuse clamp).
+    #[serde(default = "d_bond_max")]
+    pub bond_max_delta: i32,
+    /// Event XP rewards by level name, e.g. {minor=50, major=200, epic=500}.
+    #[serde(default = "d_events")]
+    pub events: std::collections::HashMap<String, i32>,
+}
+
+fn d_base_xp() -> i32 { 3 }
+fn d_turn_energy() -> i32 { 4 }
+fn d_xp_base() -> i32 { 50 }
+fn d_regen() -> i32 { 20 }
+fn d_bond_max() -> i32 { 5 }
+fn d_events() -> std::collections::HashMap<String, i32> {
+    [("minor".to_string(), 50), ("major".to_string(), 200), ("epic".to_string(), 500)]
+        .into_iter()
+        .collect()
+}
+
+impl Default for GrowthConfig {
+    fn default() -> Self {
+        Self {
+            base_xp: d_base_xp(),
+            turn_energy: d_turn_energy(),
+            xp_base: d_xp_base(),
+            energy_regen_per_hour: d_regen(),
+            bond_max_delta: d_bond_max(),
+            events: d_events(),
+        }
+    }
+}
+
+impl GrowthConfig {
+    /// Resolve an event level name to its XP reward (unknown → minor's value).
+    pub fn event_xp(&self, level: &str) -> i32 {
+        self.events
+            .get(level)
+            .copied()
+            .or_else(|| self.events.get("minor").copied())
+            .unwrap_or(50)
+    }
 }
 
 impl Config {

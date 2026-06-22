@@ -273,6 +273,24 @@ static void drawBar(int x, int y, int w, int h, int pct, uint16_t fg) {
     int fw = (w - 4) * p / 100;
     if (fw >= h - 4) g.fillRoundRect(x + 2, y + 2, fw, h - 4, (h - 4) / 2, fg);
 }
+static void iconHeart(int cx, int cy, uint16_t c) {
+    auto& g = canvas;
+    g.fillCircle(cx - 2, cy - 1, 2, c);
+    g.fillCircle(cx + 2, cy - 1, 2, c);
+    g.fillTriangle(cx - 4, cy, cx + 4, cy, cx, cy + 4, c);
+}
+static void iconBolt(int cx, int cy, uint16_t c) {
+    auto& g = canvas;   // a small lightning bolt
+    g.fillTriangle(cx + 2, cy - 5, cx - 3, cy + 1, cx + 1, cy, c);
+    g.fillTriangle(cx - 2, cy + 5, cx + 3, cy - 1, cx - 1, cy, c);
+}
+static void iconStar(int cx, int cy, uint16_t c) {
+    auto& g = canvas;   // a 4-point sparkle
+    g.fillTriangle(cx, cy - 5, cx - 2, cy, cx + 2, cy, c);
+    g.fillTriangle(cx, cy + 5, cx - 2, cy, cx + 2, cy, c);
+    g.fillTriangle(cx - 5, cy, cx, cy - 2, cx, cy + 2, c);
+    g.fillTriangle(cx + 5, cy, cx, cy - 2, cx, cy + 2, c);
+}
 static void drawHUD() {
     auto& g = canvas;
     Stats s = getStats();
@@ -282,9 +300,15 @@ static void drawHUD() {
     g.setCursor(10, 8);
     g.printf("Lv%d", s.level);
     int xpPct = s.xpNeed > 0 ? s.xpInLevel * 100 / s.xpNeed : 0;
-    drawBar(10, 30, 92, 7, s.energy, g.color565(0x6F, 0xD0, 0x86));
-    drawBar(10, 43, 92, 7, s.bond, g.color565(0xFF, 0x8F, 0xA8));
-    drawBar(10, 56, 92, 7, xpPct, g.color565(0x6F, 0xB7, 0xF0));
+    uint16_t cEnergy = g.color565(0x6F, 0xD0, 0x86);
+    uint16_t cBond = g.color565(0xFF, 0x8F, 0xA8);
+    uint16_t cXp = g.color565(0x6F, 0xB7, 0xF0);
+    iconBolt(14, 33, cEnergy);
+    iconHeart(14, 46, cBond);
+    iconStar(14, 59, cXp);
+    drawBar(24, 30, 78, 7, s.energy, cEnergy);
+    drawBar(24, 43, 78, 7, s.bond, cBond);
+    drawBar(24, 56, 78, 7, xpPct, cXp);
 }
 
 static void applyAppearance(const char* json) {

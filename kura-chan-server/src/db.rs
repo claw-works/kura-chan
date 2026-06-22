@@ -40,8 +40,11 @@ pub async fn connect(url: &str) -> Result<Db, sqlx::Error> {
 
 const ACTOR_COLS: &str = "actor_id, device_id, name, gender, persona, level, xp, bond, energy, appearance";
 
-pub fn xp_need(level: i32) -> i32 {
-    level.max(1) * 100
+/// XP required to clear `level` (per-level, superlinear): xp_base * L * (L+1).
+/// e.g. base=50 -> L1:100, L2:300, L3:600, L4:1000 — higher levels need more.
+pub fn xp_need(level: i32, xp_base: i32) -> i32 {
+    let l = level.max(1) as i64;
+    (xp_base as i64 * l * (l + 1)) as i32
 }
 
 pub async fn actor_by_key(db: &Db, api_key: &str) -> Option<Actor> {
@@ -186,21 +189,36 @@ pub async fn touch_session(db: &Db, session_id: &str) {
 // ---- growth / appearance (server-authoritative) ----
 
 /// Apply growth deltas; returns the updated actor (with level-ups applied).
+/// Energy first regenerates passively based on real time since the last update
+/// (`regen_per_hour`), then `denergy` is applied. Call with all-zero deltas to
+/// just settle the passive energy regen (e.g. on connect).
 pub async fn bump_growth(
     db: &Db,
     actor_id: &str,
     dxp: i32,
     dbond: i32,
     denergy: i32,
+    xp_base: i32,
+    regen_per_hour: i32,
 ) -> Option<Actor> {
     let mut a = actor_by_id(db, actor_id).await?;
+    // passive energy regen since last update
+    let elapsed_secs: f64 = sqlx::query_scalar(
+        "SELECT extract(epoch from now() - updated_at)::float8 FROM actors WHERE actor_id=$1",
+    )
+    .bind(actor_id)
+    .fetch_one(db)
+    .await
+    .unwrap_or(0.0);
+    let regen = (elapsed_secs / 3600.0 * regen_per_hour as f64) as i32;
+
     a.xp += dxp;
-    while a.xp >= xp_need(a.level) {
-        a.xp -= xp_need(a.level);
+    while a.xp >= xp_need(a.level, xp_base) {
+        a.xp -= xp_need(a.level, xp_base);
         a.level += 1;
     }
     a.bond = (a.bond + dbond).clamp(0, 100);
-    a.energy = (a.energy + denergy).clamp(0, 100);
+    a.energy = (a.energy + regen + denergy).clamp(0, 100);
     let _ = sqlx::query(
         "UPDATE actors SET level=$2, xp=$3, bond=$4, energy=$5, updated_at=now() WHERE actor_id=$1",
     )

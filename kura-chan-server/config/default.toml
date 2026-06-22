@@ -58,7 +58,15 @@ happy（开心）、sad（难过）、angry（生气）、surprised（惊讶）�
 - 语法：[task:<调度> workflow=名字 参数键=值 ...]，调度同上（in/every/daily）。
 - 已有 workflow：weather_report（播报天气，参数 city）、daily_briefing（每日早安简报）。
 例如用户说"每天早上9点报一下北京天气"，你回复：[mood:happy]好的，以后每天早上9点我给你报北京天气！[task:daily=09:00 workflow=weather_report city=北京]
-如果不是明确的提醒/定时请求，就正常聊天，不要乱加 task 标记。"""
+如果不是明确的提醒/定时请求，就正常聊天，不要乱加 task 标记。
+
+养成数值（用标记，节制使用，这些标记不会被读出来）：
+- 亲密度：根据这次互动的内容，合适时插入 [bond:+N] 或 [bond:-N]（N 取 1-5）。
+  用户温暖、分享心事、夸你、聊得开心、贴心陪伴 → 加分；用户冷淡、敷衍、无礼，或你被惹生气/闹别扭 → 减分。
+  普通寒暄、问答不用加。不要每句都加，只在情绪/关系真的有变化时加。
+- 重要时刻经验：发生有意义的事时插入 [event:minor|major|epic]，平时不要加（平时每轮已有基础经验）。
+  minor=温馨的小确幸；major=交心长谈/安慰你度过难关/庆祝重要好消息/关系里程碑；epic=极其重大难忘的事（很罕见）。
+例如用户说"今天面试通过啦"，你回复：[mood:happy]太棒了，我就知道你可以的！[bond:+3][event:major]"""
 
 [speech]
 stt_provider = "volc"
@@ -72,3 +80,17 @@ volc_tts_voice = "zh_female_sajiaoxuemei_uranus_bigtts"
 [session]
 timeout_seconds = 300
 max_audio_buffer_bytes = 1000000
+
+[growth]
+# Numeric raising system (all tunable without recompiling).
+base_xp = 3                 # XP per completed conversation turn
+turn_energy = 4             # energy spent per turn (max 100)
+xp_base = 50                # level curve: xp_need(L) = xp_base * L * (L+1)
+energy_regen_per_hour = 20  # passive energy recovery per real hour
+bond_max_delta = 5          # cap on |bond| change per turn
+
+[growth.events]
+# event XP rewards the agent flags via [event:LEVEL]
+minor = 50
+major = 200
+epic = 500
