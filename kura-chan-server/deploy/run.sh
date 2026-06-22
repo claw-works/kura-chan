@@ -26,11 +26,11 @@ set +a
 export AWS_REGION="${AWS_REGION:-us-west-2}"
 export RUST_LOG="${RUST_LOG:-info,kura_chan_server=debug}"
 
-BIN="$ROOT/target/release/kura-chan-server"
-if [ ! -x "$BIN" ]; then
-  echo "[run] 未找到 release 二进制，先编译 ..."
-  cargo build --release
-fi
+# 开发模式：每次启动都增量编译 debug 二进制（快），保证跑的是最新代码。
+# 要跑优化版时改回：cargo build --release + BIN=target/release/kura-chan-server。
+echo "[run] building (debug) ..."
+cargo build
+BIN="$ROOT/target/debug/kura-chan-server"
 
-echo "[run] starting $BIN (listen 0.0.0.0:8080, AWS_REGION=${AWS_REGION})"
+echo "[run] starting $BIN (listen ${KURA_SERVER_PORT:-8080}, AWS_REGION=${AWS_REGION})"
 exec "$BIN"
