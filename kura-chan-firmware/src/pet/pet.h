@@ -54,4 +54,10 @@ void applySync(const char* gender, const char* appearanceJson); // gender + appe
 String appearanceJson();                 // current appearance selection (for status report)
 void setBg(const char* name);            // scene background (fetched from /assets/bg/<name>.png; "" = none)
 
+// ===== Status overlay =====
+// Drawn by the render task (never by main) to avoid cross-task LCD access.
+// main feeds the page text and toggles visibility.
+void showStatus(bool on);              // show/hide the status page
+void setStatusText(const char* text);  // '\n'-separated lines for the status page
+
 }  // namespace pet

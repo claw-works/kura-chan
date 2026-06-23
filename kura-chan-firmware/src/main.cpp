@@ -241,6 +241,13 @@ static uint32_t gesture_start = 0;
 static constexpr uint32_t GESTURE_MS = 1300;
 static int cur_volume_pct = 78;  // M5.Speaker volume ~200/255
 
+// === Second screen: tap the LCD to toggle a status page (independent of the
+// head touch sensor, which is hold-to-talk). While in Status the pet render
+// task is suspended and main owns the LCD. ===
+enum class UiScreen : uint8_t { Pet, Status };
+static UiScreen ui_screen = UiScreen::Pet;
+static uint32_t status_last_draw = 0;
+
 void draw_status_bar() {
     // No-op: the avatar render task owns the whole LCD now. Status/IP/WS/VAD
     // overlay can be re-added later via avatar.addTask() or a speech balloon.
@@ -266,6 +273,40 @@ void draw_status_bar() {
         case AudioState::Speaking:  lcd.setTextColor(0x55FF55); lcd.print("SPK"); break;
         default:                    lcd.setTextColor(0x666666); lcd.print(asleep ? "zzz" : "idle"); break;
     }
+}
+
+// === Second screen: build the status page text. Rendering happens in the pet
+// render task (single owner of the LCD); main only assembles the text here. ===
+static void build_status_text(char* out, size_t cap) {
+    bool wifi_ok = (WiFi.status() == WL_CONNECTED);
+    int bat = M5.Power.getBatteryLevel();
+    bool charging = ((int)M5.Power.isCharging() != 0);
+    const char* st = asleep ? "sleep"
+        : audio_state == AudioState::Listening ? "listen"
+        : audio_state == AudioState::Waiting ? "think"
+        : audio_state == AudioState::Speaking ? "speak" : "idle";
+    pet::Stats s = pet::getStats();
+    String ip = wifi_ok ? WiFi.localIP().toString() : String("-");
+    String ssid = wifi_ok ? WiFi.SSID() : String("disconnected");
+    snprintf(out, cap,
+        "WiFi  %s\n"
+        "IP    %s  %ddBm\n"
+        "WS    %s\n"
+        "Srv   %s:%u\n"
+        "Batt  %d%%%s   Vol %d%%\n"
+        "State %s   vad %u\n"
+        "Pet   Lv%d  xp %d/%d\n"
+        "Grow  bond %d  energy %d  turns %ld\n"
+        "ID    %s",
+        ssid.c_str(),
+        ip.c_str(), wifi_ok ? (int)WiFi.RSSI() : 0,
+        ws_state == 2 ? "ready" : ws_state == 1 ? "connected" : "offline",
+        configStore.getServerHost().c_str(), configStore.getServerPort(),
+        bat, charging ? "+" : "", cur_volume_pct,
+        st, (unsigned)vad_level,
+        s.level, s.xpInLevel, s.xpNeed,
+        s.bond, s.energy, s.totalTurns,
+        configStore.getDeviceId().c_str());
 }
 
 // === Face primitives ===
@@ -843,6 +884,29 @@ void loop() {
 
     uint32_t now = millis();
 
+    // === Screen touch: toggle the status screen. Edge-detected; independent of
+    // the head sensor (hold-to-talk). Entering suspends the pet render task and
+    // draws the status page; leaving resumes the pet view. ===
+    {
+        auto td = M5.Touch.getDetail();
+        static bool prev_screen = false;
+        bool pressed = td.isPressed();
+        bool screen_tap = pressed && !prev_screen;
+        prev_screen = pressed;
+        if (screen_tap) {
+            if (ui_screen == UiScreen::Pet) {
+                ui_screen = UiScreen::Status;
+                char sbuf[640]; build_status_text(sbuf, sizeof sbuf);
+                pet::setStatusText(sbuf);
+                pet::showStatus(true);
+                status_last_draw = now;
+            } else {
+                ui_screen = UiScreen::Pet;
+                pet::showStatus(false);
+            }
+        }
+    }
+
     // === Tap to talk: tap head once to start listening, tap again to send. ===
     // (Energy VAD is unreliable in noisy rooms, so the turn is ended by a tap.
     // screen touch intentionally not used as a trigger.)
@@ -873,7 +937,11 @@ void loop() {
         started_now = true;
         draw_status_bar();
     }
-    if (started_now) stop_req = false;
+    if (started_now) {
+        stop_req = false;
+        // jump back to the pet view when a turn starts so the user sees the face
+        if (ui_screen == UiScreen::Status) { ui_screen = UiScreen::Pet; pet::showStatus(false); }
+    }
 
     // Listening: keep recording until a second tap (or max length). A latch
     // catches the transient tap edge even while the mic chunk is in flight.
@@ -987,7 +1055,17 @@ void loop() {
     }
 
     // Face: state-driven expressions + per-state animation
-    update_face(now);
+    // Face/status: drive the pet character in Pet mode; in Status mode refresh
+    // the status text ~1Hz (the pet render task draws it — single LCD owner).
+    if (ui_screen == UiScreen::Status) {
+        if (now - status_last_draw > 1000) {
+            status_last_draw = now;
+            char sbuf[640]; build_status_text(sbuf, sizeof sbuf);
+            pet::setStatusText(sbuf);
+        }
+    } else {
+        update_face(now);
+    }
     update_hardware(now);
     if (pet::consumeLevelUp()) pet::react(pet::React::Hop);  // celebrate level-up (server-driven)
 
