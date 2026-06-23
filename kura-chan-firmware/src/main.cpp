@@ -171,6 +171,7 @@ static uint32_t VAD_MIN_MARGIN  = 150;   // and at least this much above floor
 static uint32_t VAD_END_SILENCE_MS = 700;   // low for this long after speech -> send
 static float noise_floor = 0;                      // adaptive ambient estimate (per turn)
 static uint32_t listen_start_ms = 0;
+static uint32_t baseline_until = 0;   // ambient-calibration window end (noise-robust VAD)
 static uint32_t last_voice_ms = 0;
 static uint32_t last_touch_ms = 0;  // hold-to-talk: last time head was touched
 static bool speech_detected = false;
@@ -239,7 +240,7 @@ static int man_pitch_deg = 0;            // up only (>=0); down hits base
 static int gesture = 0;                  // 0 none, 1 nod, 2 shake (one-shot)
 static uint32_t gesture_start = 0;
 static constexpr uint32_t GESTURE_MS = 1300;
-static int cur_volume_pct = 78;  // M5.Speaker volume ~200/255
+static int cur_volume_pct = 100;  // M5.Speaker volume (100% = 255) — loud for noisy venues
 
 // === Second screen: tap the LCD to toggle a status page (independent of the
 // head touch sensor, which is hold-to-talk). While in Status the pet render
@@ -615,6 +616,7 @@ static void start_listening(uint32_t now_ms, bool followup) {
     noise_floor = 0;  // adaptive VAD: re-seed ambient each turn
     followup_listen = followup;
     listen_start_ms = now_ms;
+    baseline_until = now_ms + 600;   // first 600ms = measure ambient noise (anti-noise VAD)
     last_voice_ms = now_ms;
     last_touch_ms = now_ms;  // hold-to-talk: touching at start
     last_activity_ms = now_ms;  // any new listening turn resets idle/sleep timer
@@ -635,7 +637,7 @@ static void finish_listening(bool send, uint32_t now_ms) {
         send_recording();
     } else {
         M5.Speaker.begin();
-        M5.Speaker.setVolume(200);
+        M5.Speaker.setVolume(255);
         go_to_sleep();
     }
 }
@@ -826,7 +828,7 @@ void setup() {
     play_buf = (uint8_t*)heap_caps_malloc(PLAY_MAX_BYTES, MALLOC_CAP_SPIRAM);
     // Speaker on by default; switch to Mic only while recording.
     M5.Speaker.begin();
-    M5.Speaker.setVolume(200);
+    M5.Speaker.setVolume(255);
 
     WiFi.mode(WIFI_STA);
     WiFi.setAutoReconnect(true);
@@ -960,22 +962,24 @@ void loop() {
                 vad_level = n ? (uint32_t)(sum / (int64_t)n) : 0;
                 chunk_pending = false;
 
-                // --- adaptive VAD: thresholds relative to the ambient floor ---
-                if (noise_floor <= 0) noise_floor = (float)vad_level;  // seed on 1st chunk
-                float rise = noise_floor * VAD_RISE_FACTOR + VAD_MIN_MARGIN;
-                float keep = noise_floor * VAD_KEEP_FACTOR + (VAD_MIN_MARGIN / 2);
-                if (!speech_detected) {
-                    // track ambient while waiting: fall fast to quiet, rise slowly
-                    if ((float)vad_level < noise_floor) noise_floor = (float)vad_level;
-                    else noise_floor += ((float)vad_level - noise_floor) * 0.05f;
-                }
-                if ((float)vad_level > rise) {
-                    voiced_run++;
-                    last_voice_ms = now;
-                    if (voiced_run >= VAD_MIN_RUN) speech_detected = true;
+                // --- noise-robust VAD: first calibrate the ambient floor over a
+                // short baseline window (track the peak), then FREEZE it so the
+                // thresholds clear venue noise — in loud rooms a drifting floor let
+                // noise masquerade as speech and the turn never ended. ---
+                if (now < baseline_until) {
+                    if ((float)vad_level > noise_floor) noise_floor = (float)vad_level;
                 } else {
-                    voiced_run = 0;
-                    if (speech_detected && (float)vad_level > keep) last_voice_ms = now;
+                    if (noise_floor <= 0) noise_floor = (float)vad_level;
+                    float rise = noise_floor * VAD_RISE_FACTOR + VAD_MIN_MARGIN;
+                    float keep = noise_floor * VAD_KEEP_FACTOR + (VAD_MIN_MARGIN / 2);
+                    if ((float)vad_level > rise) {
+                        voiced_run++;
+                        last_voice_ms = now;
+                        if (voiced_run >= VAD_MIN_RUN) speech_detected = true;
+                    } else {
+                        voiced_run = 0;
+                        if (speech_detected && (float)vad_level > keep) last_voice_ms = now;
+                    }
                 }
             }
             bool too_long = rec_samples + 1600 > REC_MAX_SAMPLES;
@@ -1005,7 +1009,7 @@ void loop() {
         last_activity_ms = now;  // AI answer arriving → reset idle/sleep timer
         M5.Mic.end();
         M5.Speaker.begin();
-        M5.Speaker.setVolume(200);
+        M5.Speaker.setVolume(255);
         audio_state = AudioState::Speaking;
         draw_status_bar();
     }
@@ -1045,7 +1049,7 @@ void loop() {
     if (audio_state == AudioState::Idle && M5.Mic.isEnabled()) {
         M5.Mic.end();
         M5.Speaker.begin();
-        M5.Speaker.setVolume(200);
+        M5.Speaker.setVolume(255);
     }
 
     // Enter sleep after inactivity
