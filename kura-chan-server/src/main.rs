@@ -1,4 +1,5 @@
 mod agent_loop;
+mod admin;
 mod api;
 mod assets;
 mod auth;

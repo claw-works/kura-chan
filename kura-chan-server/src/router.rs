@@ -1,12 +1,24 @@
 use std::sync::Arc;
 
-use axum::routing::{delete, get};
+use axum::routing::{delete, get, put};
 use axum::Router;
 
+use crate::admin;
 use crate::api;
 use crate::ws::{self, AppState};
 
 pub fn create_router(state: Arc<AppState>) -> Router {
+    // token-gated admin API (X-Admin-Token == ADMIN_TOKEN)
+    let admin_api: Router<Arc<AppState>> = Router::new()
+        .route("/fragments", get(admin::list_fragments).post(admin::upsert_fragment))
+        .route("/fragments/{id}", delete(admin::delete_fragment))
+        .route("/catalog", get(admin::list_catalog))
+        .route("/catalog/{id}", put(admin::update_catalog))
+        .route("/templates", get(admin::list_templates).post(admin::set_template))
+        .route("/actors", get(admin::list_actors))
+        .route("/actors/{id}", put(admin::set_actor))
+        .layer(axum::middleware::from_fn(admin::require_token));
+
     Router::new()
         .route("/ws/device", get(ws::ws_upgrade))
         .route("/health", get(health))
@@ -21,6 +33,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/tasks/{id}", delete(api::delete_task))
         .route("/workflows", get(api::list_workflows).post(api::upsert_workflow))
         .route("/workflows/{name}", delete(api::delete_workflow))
+        .route("/ui/admin", get(admin::page))
+        .nest("/api/admin", admin_api)
         .with_state(state)
 }
 

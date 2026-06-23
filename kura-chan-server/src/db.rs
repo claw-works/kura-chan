@@ -397,3 +397,106 @@ pub async fn insert_fragment(
     .execute(db)
     .await;
 }
+
+// ---- admin CRUD (used by the /ui/admin page; token-gated) ----
+
+#[derive(Debug, serde::Serialize, sqlx::FromRow)]
+pub struct FragmentRow {
+    pub id: i64,
+    pub scope: String,
+    pub kind: String,
+    pub min_bond: i32,
+    pub min_level: i32,
+    pub content: String,
+    pub ord: i32,
+}
+
+#[derive(Debug, serde::Serialize, sqlx::FromRow)]
+pub struct CatalogRow {
+    pub id: i64,
+    pub gender: String,
+    pub slot: String,
+    pub variant: String,
+    pub min_level: i32,
+    pub min_bond: i32,
+}
+
+#[derive(Debug, serde::Serialize, sqlx::FromRow)]
+pub struct TemplateRow {
+    pub key: String,
+    pub content: String,
+}
+
+#[derive(Debug, serde::Serialize, sqlx::FromRow)]
+pub struct ActorRow {
+    pub actor_id: String,
+    pub device_id: Option<String>,
+    pub name: String,
+    pub gender: String,
+    pub level: i32,
+    pub xp: i32,
+    pub bond: i32,
+    pub energy: i32,
+}
+
+pub async fn admin_list_fragments(db: &Db) -> Vec<FragmentRow> {
+    sqlx::query_as::<_, FragmentRow>(
+        "SELECT id, scope, kind, min_bond, min_level, content, ord FROM prompt_fragments ORDER BY kind, min_bond, id",
+    )
+    .fetch_all(db).await.unwrap_or_default()
+}
+
+pub async fn admin_upsert_fragment(
+    db: &Db, id: Option<i64>, scope: &str, kind: &str,
+    min_bond: i32, min_level: i32, content: &str, ord: i32,
+) -> Result<i64, sqlx::Error> {
+    if let Some(fid) = id {
+        sqlx::query("UPDATE prompt_fragments SET scope=$2,kind=$3,min_bond=$4,min_level=$5,content=$6,ord=$7 WHERE id=$1")
+            .bind(fid).bind(scope).bind(kind).bind(min_bond).bind(min_level).bind(content).bind(ord)
+            .execute(db).await?;
+        Ok(fid)
+    } else {
+        let row: (i64,) = sqlx::query_as(
+            "INSERT INTO prompt_fragments(scope,kind,min_bond,min_level,content,ord) VALUES($1,$2,$3,$4,$5,$6) RETURNING id",
+        )
+        .bind(scope).bind(kind).bind(min_bond).bind(min_level).bind(content).bind(ord)
+        .fetch_one(db).await?;
+        Ok(row.0)
+    }
+}
+
+pub async fn admin_delete_fragment(db: &Db, id: i64) -> bool {
+    sqlx::query("DELETE FROM prompt_fragments WHERE id=$1")
+        .bind(id).execute(db).await.map(|r| r.rows_affected() > 0).unwrap_or(false)
+}
+
+pub async fn admin_list_catalog(db: &Db) -> Vec<CatalogRow> {
+    sqlx::query_as::<_, CatalogRow>(
+        "SELECT id, gender, slot, variant, min_level, min_bond FROM catalog_items ORDER BY gender, slot, variant",
+    )
+    .fetch_all(db).await.unwrap_or_default()
+}
+
+pub async fn admin_update_catalog(db: &Db, id: i64, min_level: i32, min_bond: i32) -> bool {
+    sqlx::query("UPDATE catalog_items SET min_level=$2, min_bond=$3 WHERE id=$1")
+        .bind(id).bind(min_level).bind(min_bond)
+        .execute(db).await.map(|r| r.rows_affected() > 0).unwrap_or(false)
+}
+
+pub async fn admin_list_templates(db: &Db) -> Vec<TemplateRow> {
+    sqlx::query_as::<_, TemplateRow>("SELECT key, content FROM prompt_templates ORDER BY key")
+        .fetch_all(db).await.unwrap_or_default()
+}
+
+pub async fn admin_list_actors(db: &Db) -> Vec<ActorRow> {
+    sqlx::query_as::<_, ActorRow>(
+        "SELECT actor_id, device_id, name, gender, level, xp, bond, energy FROM actors ORDER BY created_at",
+    )
+    .fetch_all(db).await.unwrap_or_default()
+}
+
+pub async fn admin_set_actor_growth(db: &Db, actor_id: &str, level: i32, bond: i32, energy: i32) -> bool {
+    sqlx::query("UPDATE actors SET level=$2, bond=$3, energy=$4, updated_at=now() WHERE actor_id=$1")
+        .bind(actor_id).bind(level).bind(bond.clamp(0, 100)).bind(energy.clamp(0, 100))
+        .execute(db).await.map(|r| r.rows_affected() > 0).unwrap_or(false)
+}

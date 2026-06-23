@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kura-chan Admin</title>
+<style>
+  :root { --bg:#14161c; --card:#1d212b; --line:#2c313d; --fg:#e7e9ee; --mut:#8b93a3; --acc:#ffce5a; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.5 -apple-system,system-ui,sans-serif; background:var(--bg); color:var(--fg); }
+  header { padding:12px 16px; background:var(--card); border-bottom:1px solid var(--line); display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  header b { color:var(--acc); margin-right:8px; }
+  input, textarea, select { background:#0f1218; color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:6px 8px; font:inherit; }
+  input[type=number] { width:64px; }
+  button { background:var(--acc); color:#1a1a1a; border:0; border-radius:6px; padding:6px 12px; font-weight:600; cursor:pointer; }
+  button.sec { background:#2c313d; color:var(--fg); }
+  button.del { background:#a23; color:#fff; }
+  nav { display:flex; gap:4px; padding:10px 16px; flex-wrap:wrap; }
+  nav a { padding:6px 12px; border-radius:6px; color:var(--mut); cursor:pointer; }
+  nav a.on { background:var(--card); color:var(--fg); }
+  main { padding:0 16px 40px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:12px; margin:10px 0; }
+  .row { display:flex; gap:8px; align-items:flex-start; flex-wrap:wrap; }
+  .row > * { flex:0 0 auto; }
+  textarea { flex:1 1 320px; min-height:60px; }
+  .mut { color:var(--mut); font-size:12px; }
+  .tag { font-size:11px; padding:2px 6px; border:1px solid var(--line); border-radius:10px; color:var(--mut); }
+  h3 { margin:18px 0 6px; }
+</style>
+</head>
+<body>
+<header>
+  <b>Kura-chan Admin</b>
+  <input id="tok" type="password" placeholder="ADMIN_TOKEN" style="flex:1 1 200px">
+  <button onclick="saveTok()">保存 token</button>
+  <span id="msg" class="mut"></span>
+</header>
+<nav>
+  <a data-t="actors" class="on">数值 (actors)</a>
+  <a data-t="fragments">提示词片段</a>
+  <a data-t="templates">公共规则</a>
+  <a data-t="catalog">物料解锁</a>
+</nav>
+<main id="main"></main>
+
+<script>
+const $ = s => document.querySelector(s);
+const tok = () => localStorage.getItem('admin_token') || '';
+function saveTok(){ localStorage.setItem('admin_token', $('#tok').value.trim()); flash('token 已保存'); }
+function flash(m){ $('#msg').textContent = m; setTimeout(()=>$('#msg').textContent='',2500); }
+async function api(method, path, body){
+  const r = await fetch('/api/admin'+path, {
+    method, headers:{'Content-Type':'application/json','X-Admin-Token':tok()},
+    body: body!==undefined ? JSON.stringify(body) : undefined
+  });
+  if(r.status===401){ flash('token 错误或未设置'); throw new Error('unauth'); }
+  if(r.status===403){ flash('服务器未设置 ADMIN_TOKEN'); throw new Error('noenv'); }
+  if(!r.ok && r.status!==204){ flash('请求失败 '+r.status); throw new Error(r.status); }
+  return r.status===204 ? null : r.json().catch(()=>null);
+}
+const esc = s => (s??'').replace(/</g,'&lt;');
+
+let cur = 'actors';
+document.querySelectorAll('nav a').forEach(a=>a.onclick=()=>{
+  cur=a.dataset.t; document.querySelectorAll('nav a').forEach(x=>x.classList.toggle('on',x===a)); render();
+});
+
+async function render(){
+  const m = $('#main'); m.innerHTML = '加载中…';
+  try {
+    if(cur==='actors') return renderActors(m);
+    if(cur==='fragments') return renderFragments(m);
+    if(cur==='templates') return renderTemplates(m);
+    if(cur==='catalog') return renderCatalog(m);
+  } catch(e){ m.innerHTML = '<div class="card">加载失败，检查 token。</div>'; }
+}
+
+async function renderActors(m){
+  const rows = await api('GET','/actors');
+  m.innerHTML = '<p class="mut">改完数值后，设备需重连才生效。</p>';
+  rows.forEach(a=>{
+    const d=document.createElement('div'); d.className='card';
+    d.innerHTML = `<div class="row">
+      <b>${esc(a.name)}</b> <span class="tag">${esc(a.actor_id)}</span> <span class="tag">${esc(a.device_id||'-')}</span>
+    </div><div class="row" style="margin-top:8px">
+      Lv<input type="number" value="${a.level}" id="al_${a.actor_id}">
+      bond<input type="number" value="${a.bond}" id="ab_${a.actor_id}">
+      energy<input type="number" value="${a.energy}" id="ae_${a.actor_id}">
+      <button onclick="saveActor('${a.actor_id}')">保存</button></div>`;
+    m.appendChild(d);
+  });
+}
+async function saveActor(id){
+  await api('PUT','/actors/'+id,{level:+$('#al_'+id).value,bond:+$('#ab_'+id).value,energy:+$('#ae_'+id).value});
+  flash('已保存'); 
+}
+
+async function renderFragments(m){
+  const rows = await api('GET','/fragments');
+  m.innerHTML = '<button onclick="newFrag()">+ 新增片段</button><p class="mut">kind: persona/topic/boundary 取满足阈值的最高档; rule 始终生效。改完设备重连生效。</p>';
+  rows.forEach(f=>m.appendChild(fragCard(f)));
+}
+function fragCard(f){
+  const d=document.createElement('div'); d.className='card'; d.dataset.id=f.id??'';
+  d.innerHTML = `<div class="row">
+    <span class="tag">id ${f.id??'new'}</span>
+    scope<input value="${esc(f.scope||'global')}" class="f_scope" style="width:120px">
+    kind<select class="f_kind">${['persona','topic','boundary','rule'].map(k=>`<option ${k===f.kind?'selected':''}>${k}</option>`).join('')}</select>
+    minBond<input type="number" value="${f.min_bond??0}" class="f_mb">
+    minLevel<input type="number" value="${f.min_level??0}" class="f_ml">
+    ord<input type="number" value="${f.ord??0}" class="f_ord">
+  </div><div class="row" style="margin-top:8px">
+    <textarea class="f_content">${esc(f.content)}</textarea>
+  </div><div class="row" style="margin-top:8px">
+    <button onclick="saveFrag(this)">保存</button>
+    ${f.id?`<button class="del" onclick="delFrag(${f.id})">删除</button>`:''}
+  </div>`;
+  return d;
+}
+function newFrag(){ $('#main').insertBefore(fragCard({scope:'global',kind:'persona',min_bond:0,min_level:0,ord:10,content:''}), $('#main').children[2]); }
+async function saveFrag(btn){
+  const c = btn.closest('.card');
+  const id = c.dataset.id ? +c.dataset.id : null;
+  const r = await api('POST','/fragments',{ id, scope:c.querySelector('.f_scope').value, kind:c.querySelector('.f_kind').value,
+    min_bond:+c.querySelector('.f_mb').value, min_level:+c.querySelector('.f_ml').value,
+    content:c.querySelector('.f_content').value, ord:+c.querySelector('.f_ord').value });
+  if(r&&r.id) c.dataset.id=r.id; flash('已保存'); render();
+}
+async function delFrag(id){ if(confirm('删除片段 '+id+'?')){ await api('DELETE','/fragments/'+id); flash('已删除'); render(); } }
+
+async function renderTemplates(m){
+  const rows = await api('GET','/templates');
+  m.innerHTML='<p class="mut">公共规则 / 安全底线。改完设备重连生效。</p>';
+  rows.forEach(t=>{
+    const d=document.createElement('div'); d.className='card';
+    d.innerHTML=`<div class="row"><b>${esc(t.key)}</b></div>
+      <div class="row" style="margin-top:8px"><textarea id="t_${t.key}" style="min-height:160px">${esc(t.content)}</textarea></div>
+      <div class="row" style="margin-top:8px"><button onclick="saveTpl('${t.key}')">保存</button></div>`;
+    m.appendChild(d);
+  });
+}
+async function saveTpl(k){ await api('POST','/templates',{key:k,content:$('#t_'+k).value}); flash('已保存'); }
+
+async function renderCatalog(m){
+  const rows = await api('GET','/catalog');
+  m.innerHTML='<p class="mut">物料解锁门槛 (minLevel / minBond)。改完设备重连生效。</p>';
+  const by={}; rows.forEach(c=>{(by[c.slot]=by[c.slot]||[]).push(c);});
+  Object.keys(by).sort().forEach(slot=>{
+    const h=document.createElement('h3'); h.textContent=slot; m.appendChild(h);
+    by[slot].forEach(c=>{
+      const d=document.createElement('div'); d.className='card';
+      d.innerHTML=`<div class="row"><span class="tag">${esc(c.gender)}</span> <b>${esc(c.variant)}</b>
+        minLevel<input type="number" value="${c.min_level}" id="cl_${c.id}">
+        minBond<input type="number" value="${c.min_bond}" id="cb_${c.id}">
+        <button onclick="saveCat(${c.id})">保存</button></div>`;
+      m.appendChild(d);
+    });
+  });
+}
+async function saveCat(id){ await api('PUT','/catalog/'+id,{min_level:+$('#cl_'+id).value,min_bond:+$('#cb_'+id).value}); flash('已保存'); }
+
+$('#tok').value = tok();
+render();
+</script>
+</body>
+</html>
