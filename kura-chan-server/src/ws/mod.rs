@@ -106,11 +106,9 @@ async fn handle_socket(socket: WebSocket, device_id: String, mut actor: Actor, s
 
     let mut session = Session::new(device_id.clone(), state.config.clone());
 
-    // per-actor system prompt = name + persona prefix + common rules + live asset options
-    let rules = state.config.agent.system_prompt.clone();
-    let persona_full = format!("你的名字是{}。{}", actor.name, actor.persona.trim());
-    let options = crate::assets::options_prompt(&actor.gender);
-    let system_prompt = format!("{}\n\n{}\n\n{}", persona_full.trim(), rules, options);
+    // per-actor system prompt: persona + common rules + unlocked spirit fragments
+    // + relationship state + unlocked asset options (all level/bond gated, from PG)
+    let system_prompt = build_system_prompt(&state, &actor).await;
     let session_ttl = state.config.session.idle_new_session_secs as i64;
     let growth = state.config.growth.clone();
 
@@ -315,9 +313,11 @@ async fn handle_socket(socket: WebSocket, device_id: String, mut actor: Actor, s
                     let event_xp: i32 =
                         turn_growth.events.iter().map(|lvl| growth.event_xp(lvl)).sum();
                     let dxp = growth.base_xp + event_xp;
+                    // positive capped (anti-farming); negative allowed to go
+                    // deeper so serious boundary violations break the normal cap.
                     let dbond = turn_growth
                         .bond
-                        .clamp(-growth.bond_max_delta, growth.bond_max_delta);
+                        .clamp(-(growth.bond_max_delta * 3), growth.bond_max_delta);
                     if let Some(a) = db::bump_growth(
                         &state.db,
                         &actor.actor_id,
@@ -596,6 +596,49 @@ async fn speak_phrase(
 async fn send_event(tx: &crate::registry::DeviceTx, event: SessionEvent) {
     // Hand the event to the per-device writer task (non-blocking).
     let _ = tx.send(event);
+}
+
+/// Assemble the per-actor system prompt from PG (all level/bond gated):
+/// persona base + common rules + unlocked spirit fragments (rule=always,
+/// persona/topic/boundary=highest unlocked tier) + relationship state + options.
+async fn build_system_prompt(state: &AppState, actor: &Actor) -> String {
+    let persona = format!("你的名字是{}。{}", actor.name, actor.persona.trim());
+    let rules = db::get_prompt_template(&state.db, "common_rules")
+        .await
+        .unwrap_or_else(|| state.config.agent.system_prompt.clone());
+    let frags = db::get_fragments(&state.db, &actor.actor_id, actor.level, actor.bond).await;
+    let mut best: std::collections::HashMap<&str, &db::PromptFragment> =
+        std::collections::HashMap::new();
+    let mut rule_lines: Vec<&str> = Vec::new();
+    for f in &frags {
+        if f.kind == "rule" {
+            rule_lines.push(f.content.as_str());
+            continue;
+        }
+        match best.get(f.kind.as_str()) {
+            Some(c) if c.min_bond >= f.min_bond => {}
+            _ => {
+                best.insert(f.kind.as_str(), f);
+            }
+        }
+    }
+    let mut spirit: Vec<String> = rule_lines.iter().map(|s| s.to_string()).collect();
+    for k in ["persona", "topic", "boundary"] {
+        if let Some(f) = best.get(k) {
+            spirit.push(f.content.clone());
+        }
+    }
+    let rel = format!("【当前状态】等级 Lv{}，亲密度 {}/100。", actor.level, actor.bond);
+    let options =
+        crate::assets::options_prompt(&state.db, &actor.gender, actor.level, actor.bond).await;
+    format!(
+        "{}\n\n{}\n\n{}\n\n{}\n\n{}",
+        persona.trim(),
+        rules.trim(),
+        spirit.join("\n"),
+        rel,
+        options
+    )
 }
 
 /// Build a Sync event. `full` includes appearance (used on connect to restore);

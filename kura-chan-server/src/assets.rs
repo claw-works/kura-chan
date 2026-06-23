@@ -35,26 +35,24 @@ fn stem(name: &str) -> String {
 
 /// Scan the asset folders and produce a prompt section listing the variants the
 /// agent may use right now, so adding files needs no prompt edits.
-pub fn options_prompt(gender: &str) -> String {
+/// Build the "available items" prompt section from the unlocked catalog
+/// (level/bond gated), so the agent only offers what the actor has unlocked.
+pub async fn options_prompt(db: &crate::db::Db, gender: &str, level: i32, bond: i32) -> String {
     use std::collections::BTreeSet;
+    let items = crate::db::get_catalog(db, gender, level, bond).await;
     let mut hair = BTreeSet::new();
     let mut costume = BTreeSet::new();
     let mut blush = BTreeSet::new();
-    for f in list_pngish(&format!("{ASSET_DIR}/{gender}")) {
-        let s = stem(&f);
-        if let Some(v) = s.strip_prefix("10_hair_back_").or_else(|| s.strip_prefix("50_hair_front_")) {
-            hair.insert(v.to_string());
-        } else if let Some(v) = s.find("costume_").map(|i| s[i + 8..].to_string()) {
-            costume.insert(v);
-        } else if let Some(v) = s.find("blush_").map(|i| s[i + 6..].to_string()) {
-            blush.insert(v);
+    let mut scenes = BTreeSet::new();
+    for it in &items {
+        match it.slot.as_str() {
+            "hair_back" | "hair_front" => { hair.insert(it.variant.clone()); }
+            "costume" => { costume.insert(it.variant.clone()); }
+            "blush" => { blush.insert(it.variant.clone()); }
+            "bg" => { scenes.insert(it.variant.clone()); }
+            _ => {}
         }
     }
-    let scenes: BTreeSet<String> = list_pngish(&format!("{ASSET_DIR}/bg"))
-        .iter()
-        .map(|f| stem(f))
-        .collect();
-
     let join = |s: &BTreeSet<String>| s.iter().cloned().collect::<Vec<_>>().join("、");
     format!(
         "【当前可用项】(只能从下列里选, 没有的不要编造)\n\
@@ -318,5 +316,38 @@ pub async fn get_face(
             .into_response(),
         Ok(Err(e)) => (StatusCode::NOT_FOUND, e).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+
+// ---- catalog seeding: scan asset folders -> catalog_items (default thresholds) ----
+
+/// Parse "NN_slot_variant" stem into (slot, variant); None for body/base/unknown.
+fn parse_slot_variant(stem: &str) -> Option<(&'static str, String)> {
+    let body = stem.splitn(2, '_').nth(1).unwrap_or(stem); // drop leading "NN_"
+    for slot in ["hair_back", "hair_front", "costume", "blush", "accessory"] {
+        let marker = format!("{slot}_");
+        if let Some(i) = body.find(&marker) {
+            let variant = body[i + marker.len()..].to_string();
+            if !variant.is_empty() {
+                return Some((slot, variant));
+            }
+        }
+    }
+    None
+}
+
+/// Scan assets/<gender> + assets/bg and upsert catalog_items (default level 1, bond 0).
+/// New asset files are picked up automatically; thresholds are tuned later in PG.
+pub async fn seed_catalog(db: &crate::db::Db) {
+    for gender in ["girl", "boy"] {
+        for f in list_pngish(&format!("{ASSET_DIR}/{gender}")) {
+            if let Some((slot, variant)) = parse_slot_variant(&stem(&f)) {
+                crate::db::upsert_catalog_item(db, gender, slot, &variant, 1, 0).await;
+            }
+        }
+    }
+    for f in list_pngish(&format!("{ASSET_DIR}/bg")) {
+        crate::db::upsert_catalog_item(db, "*", "bg", &stem(&f), 1, 0).await;
     }
 }

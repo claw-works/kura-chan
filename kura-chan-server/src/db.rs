@@ -262,3 +262,138 @@ pub async fn log_message(db: &Db, session_id: &str, actor_id: &str, role: &str, 
     .execute(db)
     .await;
 }
+
+// ---- growth-driven content: prompt templates / fragments / catalog ----
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct CatalogItem {
+    pub gender: String,
+    pub slot: String,
+    pub variant: String,
+    pub min_level: i32,
+    pub min_bond: i32,
+    pub display_name: Option<String>,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct PromptFragment {
+    pub scope: String,
+    pub kind: String,
+    pub min_bond: i32,
+    pub min_level: i32,
+    pub content: String,
+    pub ord: i32,
+}
+
+pub async fn get_prompt_template(db: &Db, key: &str) -> Option<String> {
+    sqlx::query_scalar::<_, String>("SELECT content FROM prompt_templates WHERE key=$1")
+        .bind(key)
+        .fetch_optional(db)
+        .await
+        .ok()
+        .flatten()
+}
+
+pub async fn set_prompt_template(db: &Db, key: &str, content: &str) {
+    let _ = sqlx::query(
+        "INSERT INTO prompt_templates(key, content) VALUES($1,$2) \
+         ON CONFLICT(key) DO UPDATE SET content=EXCLUDED.content, updated_at=now()",
+    )
+    .bind(key)
+    .bind(content)
+    .execute(db)
+    .await;
+}
+
+/// Fragments unlocked for an actor at the given level/bond (global + actor-scoped),
+/// ordered by kind then ord.
+pub async fn get_fragments(db: &Db, actor_id: &str, level: i32, bond: i32) -> Vec<PromptFragment> {
+    sqlx::query_as::<_, PromptFragment>(
+        "SELECT scope, kind, min_bond, min_level, content, ord FROM prompt_fragments \
+         WHERE (scope='global' OR scope=$1) AND min_level<=$2 AND min_bond<=$3 \
+         ORDER BY kind, ord",
+    )
+    .bind(actor_id)
+    .bind(level)
+    .bind(bond)
+    .fetch_all(db)
+    .await
+    .unwrap_or_default()
+}
+
+/// Catalog items unlocked for the given gender at level/bond ('*' = any gender, e.g. bg).
+pub async fn get_catalog(db: &Db, gender: &str, level: i32, bond: i32) -> Vec<CatalogItem> {
+    sqlx::query_as::<_, CatalogItem>(
+        "SELECT gender, slot, variant, min_level, min_bond, display_name FROM catalog_items \
+         WHERE (gender=$1 OR gender='*') AND min_level<=$2 AND min_bond<=$3 ORDER BY slot, variant",
+    )
+    .bind(gender)
+    .bind(level)
+    .bind(bond)
+    .fetch_all(db)
+    .await
+    .unwrap_or_default()
+}
+
+/// Insert a template only if absent (won't clobber operator edits in PG).
+pub async fn seed_template_if_absent(db: &Db, key: &str, content: &str) {
+    let _ = sqlx::query(
+        "INSERT INTO prompt_templates(key, content) VALUES($1,$2) ON CONFLICT(key) DO NOTHING",
+    )
+    .bind(key)
+    .bind(content)
+    .execute(db)
+    .await;
+}
+
+/// Insert a catalog item if absent (used by the asset-scan seeder).
+pub async fn upsert_catalog_item(
+    db: &Db,
+    gender: &str,
+    slot: &str,
+    variant: &str,
+    min_level: i32,
+    min_bond: i32,
+) {
+    let _ = sqlx::query(
+        "INSERT INTO catalog_items(gender, slot, variant, min_level, min_bond) \
+         VALUES($1,$2,$3,$4,$5) ON CONFLICT(gender, slot, variant) DO NOTHING",
+    )
+    .bind(gender)
+    .bind(slot)
+    .bind(variant)
+    .bind(min_level)
+    .bind(min_bond)
+    .execute(db)
+    .await;
+}
+
+pub async fn count_fragments(db: &Db) -> i64 {
+    sqlx::query_scalar::<_, i64>("SELECT count(*) FROM prompt_fragments")
+        .fetch_one(db)
+        .await
+        .unwrap_or(0)
+}
+
+pub async fn insert_fragment(
+    db: &Db,
+    scope: &str,
+    kind: &str,
+    min_bond: i32,
+    min_level: i32,
+    content: &str,
+    ord: i32,
+) {
+    let _ = sqlx::query(
+        "INSERT INTO prompt_fragments(scope, kind, min_bond, min_level, content, ord) \
+         VALUES($1,$2,$3,$4,$5,$6)",
+    )
+    .bind(scope)
+    .bind(kind)
+    .bind(min_bond)
+    .bind(min_level)
+    .bind(content)
+    .bind(ord)
+    .execute(db)
+    .await;
+}
