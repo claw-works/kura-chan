@@ -266,6 +266,10 @@ static String compositePath() {
 
 // (Re)load the character composite for the current appearance (cache on SD).
 static void loadComposite() {
+    // Don't build the character until the manifest is loaded (a costume is
+    // selectable). Before that — e.g. offline at boot — appearance is incomplete
+    // and the composite would be the bare body; show "loading..." instead.
+    if (slotVarN[S_COSTUME] == 0) return;
     String key = compositeKey();
     if (charReady && key == charKey) return;
     SD.mkdir("/pet"); SD.mkdir("/pet/cache"); SD.mkdir("/pet/cache/kra");
