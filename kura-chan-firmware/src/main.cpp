@@ -637,9 +637,13 @@ static void finish_listening(bool send, uint32_t now_ms) {
         draw_status_bar();
         send_recording();
     } else {
+        // nothing usable recorded (e.g. woke/listened but didn't speak in time):
+        // fall back to idle and RESTART the sleep countdown — don't sleep right
+        // away, so a pause between turns doesn't kill the session.
         M5.Speaker.begin();
         M5.Speaker.setVolume(255);
-        go_to_sleep();
+        audio_state = AudioState::Idle;
+        last_activity_ms = now_ms;
     }
 }
 
@@ -790,6 +794,7 @@ void setup() {
         PREBUFFER_BYTES = (size_t)((uint64_t)SAMPLE_RATE * 2 * a.prebuffer_ms / 1000);
     }
     head_touch_init();
+    configTime(8 * 3600, 0, "ntp.aliyun.com", "pool.ntp.org");  // Beijing time for the on-screen clock
     hw::init();
     // ---- SD (TF) probe BEFORE the render task starts (shared SPI bus is free) ----
     {
@@ -963,16 +968,20 @@ void loop() {
                 vad_level = n ? (uint32_t)(sum / (int64_t)n) : 0;
                 chunk_pending = false;
 
-                // --- noise-robust VAD: first calibrate the ambient floor over a
-                // short baseline window (track the peak), then FREEZE it so the
-                // thresholds clear venue noise — in loud rooms a drifting floor let
-                // noise masquerade as speech and the turn never ended. ---
-                if (now < baseline_until) {
-                    if ((float)vad_level > noise_floor) noise_floor = (float)vad_level;
-                } else {
-                    if (noise_floor <= 0) noise_floor = (float)vad_level;
-                    float rise = noise_floor * VAD_RISE_FACTOR + VAD_MIN_MARGIN;
-                    float keep = noise_floor * VAD_KEEP_FACTOR + (VAD_MIN_MARGIN / 2);
+                // --- adaptive VAD: floor tracks ambient (fall fast to quiet,
+                // rise slowly); speech = energy clearly above it; submit after it
+                // falls back for END_SILENCE. The short baseline window only delays
+                // speech detection (settle after the tap), it does NOT freeze the
+                // floor — freezing the peak made early speech raise the threshold
+                // so high that speech was never detected and never auto-sent. ---
+                if (noise_floor <= 0) noise_floor = (float)vad_level;
+                float rise = noise_floor * VAD_RISE_FACTOR + VAD_MIN_MARGIN;
+                float keep = noise_floor * VAD_KEEP_FACTOR + (VAD_MIN_MARGIN / 2);
+                if (!speech_detected) {
+                    if ((float)vad_level < noise_floor) noise_floor = (float)vad_level;
+                    else noise_floor += ((float)vad_level - noise_floor) * 0.05f;
+                }
+                if (now >= baseline_until) {
                     if ((float)vad_level > rise) {
                         voiced_run++;
                         last_voice_ms = now;

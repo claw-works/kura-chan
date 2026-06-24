@@ -4,6 +4,7 @@
 #include <LittleFS.h>
 #include <M5Unified.h>
 #include <math.h>
+#include <time.h>
 #include <initializer_list>
 #include <ArduinoJson.h>
 #include <HTTPClient.h>
@@ -436,6 +437,28 @@ static void drawHUD() {
     drawBar(24, 56, 78, 7, xpPct, cXp);
 }
 
+// Top-right HH:MM clock (NTP-synced, Beijing time). Outlined white text so it
+// stays readable over any background/character. Silent until time is synced.
+static void drawClock() {
+    struct tm t;
+    if (!getLocalTime(&t, 0)) return;   // not synced yet -> draw nothing
+    char buf[6];
+    snprintf(buf, sizeof buf, "%02d:%02d", t.tm_hour, t.tm_min);
+    auto& g = canvas;
+    g.setFont(&fonts::Font7);   // 7-segment "matchstick" digit font
+    g.setTextSize(0.5f);        // shrink the (large) 7-seg font
+    g.setTextDatum(top_right);
+    const int cx = SCR_W - 6, cy = 5;
+    g.setTextColor(g.color565(0, 0, 0));
+    for (int dx = -1; dx <= 1; dx++)
+        for (int dy = -1; dy <= 1; dy++)
+            if (dx || dy) g.drawString(buf, cx + dx, cy + dy);
+    g.setTextColor(g.color565(0xFF, 0xFF, 0xFF));
+    g.drawString(buf, cx, cy);
+    g.setTextDatum(top_left);
+    g.setTextSize(1);
+}
+
 static void applyAppearance(const char* json) {
     JsonDocument d;
     if (deserializeJson(d, json)) return;
@@ -575,13 +598,21 @@ static void renderFrame(uint32_t now) {
         if (fslot >= 0 && faceBuf[fslot].valid)
             blendLayer(charX, y, faceBuf[fslot].rgb, faceBuf[fslot].a, charW, charH);
     } else {
-        canvas.setTextColor(canvas.color565(0x55, 0x5B, 0x6B));
-        canvas.setFont(&fonts::Font4);
-        canvas.setTextDatum(middle_center);
-        canvas.drawString("loading...", SCR_W / 2, SCR_H / 2);
+        // small outlined "loading" in the bottom-left: black stroke + white fill
+        canvas.setFont(&fonts::Font2);
+        canvas.setTextDatum(bottom_left);
+        const char* msg = "loading...";
+        const int lx = 6, ly = SCR_H - 4;
+        canvas.setTextColor(canvas.color565(0, 0, 0));
+        for (int dx = -1; dx <= 1; dx++)
+            for (int dy = -1; dy <= 1; dy++)
+                if (dx || dy) canvas.drawString(msg, lx + dx, ly + dy);
+        canvas.setTextColor(canvas.color565(0xFF, 0xFF, 0xFF));
+        canvas.drawString(msg, lx, ly);
         canvas.setTextDatum(top_left);
     }
     drawHUD();
+    drawClock();
     canvas.pushSprite(0, 0);
 }
 
