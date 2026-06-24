@@ -5,3 +5,5 @@ kura-server.env
 /tasks.json
 /workflows.json
 /assets/.cache/
+/server.pid
+/nohup.log

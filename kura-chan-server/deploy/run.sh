@@ -1,12 +1,25 @@
 #!/usr/bin/env bash
-# 启动 Kura-chan 服务端。读取 deploy/kura-server.env，从 server 根目录运行
-# （服务端要在该目录读取 config/default.toml），监听 0.0.0.0:8080。
-# 用法：bash deploy/run.sh
+# 启动 Kura-chan 服务端（开发模式：每次增量编译 debug 二进制）。
+# 启动前会停掉上一次启动的实例(按 server.pid)，并把新进程 pid 写入 server.pid。
+# 后台启动：  cd kura-chan-server && nohup bash deploy/run.sh >> nohup.log 2>&1 &
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$ROOT"
+
+PID_FILE="$ROOT/server.pid"
+
+# 停掉上一次的实例（先按保存的 pid，再按二进制名兜底）
+if [ -f "$PID_FILE" ]; then
+  OLD="$(cat "$PID_FILE" 2>/dev/null || true)"
+  if [ -n "${OLD:-}" ] && kill -0 "$OLD" 2>/dev/null; then
+    echo "[run] stopping old server (pid $OLD) ..."
+    kill "$OLD" 2>/dev/null || true
+  fi
+fi
+pkill -f "target/debug/kura-chan-server" 2>/dev/null || true
+sleep 1
 
 ENV_FILE="${KURA_ENV_FILE:-$SCRIPT_DIR/kura-server.env}"
 if [ ! -f "$ENV_FILE" ]; then
@@ -27,10 +40,11 @@ export AWS_REGION="${AWS_REGION:-us-west-2}"
 export RUST_LOG="${RUST_LOG:-info,kura_chan_server=debug}"
 
 # 开发模式：每次启动都增量编译 debug 二进制（快），保证跑的是最新代码。
-# 要跑优化版时改回：cargo build --release + BIN=target/release/kura-chan-server。
 echo "[run] building (debug) ..."
 cargo build
 BIN="$ROOT/target/debug/kura-chan-server"
 
 echo "[run] starting $BIN (listen ${KURA_SERVER_PORT:-8080}, AWS_REGION=${AWS_REGION})"
+# exec 替换进程映像但保留 pid，所以写入的就是 server 进程的 pid
+echo $$ > "$PID_FILE"
 exec "$BIN"
