@@ -106,9 +106,8 @@ async fn handle_socket(socket: WebSocket, device_id: String, mut actor: Actor, s
 
     let mut session = Session::new(device_id.clone(), state.config.clone());
 
-    // per-actor system prompt: persona + common rules + unlocked spirit fragments
-    // + relationship state + unlocked asset options (all level/bond gated, from PG)
-    let system_prompt = build_system_prompt(&state, &actor).await;
+    // system prompt is rebuilt per turn (see invoke below), so admin/PG edits and
+    // bond/level changes apply immediately without a device reconnect.
     let session_ttl = state.config.session.idle_new_session_secs as i64;
     let growth = state.config.growth.clone();
 
@@ -209,6 +208,13 @@ async fn handle_socket(socket: WebSocket, device_id: String, mut actor: Actor, s
 
                     // Stream the harness reply: synthesize + send sentence by sentence.
                     let user_message = session.build_user_message(&stt_text);
+                    // Rebuild the system prompt each turn from the latest actor + PG
+                    // content, so admin edits (prompts/growth) and bond/level changes
+                    // take effect immediately — no device reconnect needed.
+                    if let Some(a) = db::actor_by_id(&state.db, &actor.actor_id).await {
+                        actor = a;
+                    }
+                    let system_prompt = build_system_prompt(&state, &actor).await;
                     let mut output = match state
                         .harness
                         .invoke_stream(&user_message, &conv_session, &actor.actor_id, &system_prompt)
