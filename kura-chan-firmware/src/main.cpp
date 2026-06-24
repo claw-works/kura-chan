@@ -633,6 +633,7 @@ static void finish_listening(bool send, uint32_t now_ms) {
         audio_state = AudioState::Waiting;
         waiting_since = now_ms;
         update_face(now_ms);
+        update_hardware(now_ms);   // LED -> thinking immediately, before the blocking upload
         draw_status_bar();
         send_recording();
     } else {
