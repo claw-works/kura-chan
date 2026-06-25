@@ -1,47 +1,56 @@
-# 在 EC2 / 小电脑上部署 Kura-chan 服务端
+# 部署 Kura-chan 服务端
 
-把服务端跑在**设备能连到的机器**上。公司 Mac 因 pf + CrowdStrike + FortiDLP
-会静默丢弃入站，不能当服务端。
+把服务端跑在**设备能连到的机器**上（公网 EC2、家里带 DDNS/端口转发的机器等）。
+注意：装了 pf + 安全软件（如 CrowdStrike / FortiDLP）的公司机器可能静默丢弃入站，不适合当服务端。
 
-当前部署目标：公网 EC2 `54.187.154.83`（Amazon Linux 2023 / Graviton aarch64），监听 **8866**。
-固件已指向 `54.187.154.83:8866`（cfg_rev=2），服务端起来后设备会自动连上。
+> 编译方式：**直接在目标机上原生编译**（`cargo build` 几分钟搞定，比从 macOS 交叉
+> 编译省心；交叉编译要处理 ring/aws-lc-sys 的 C 工具链）。
 
-> 编译方式：**直接在目标机上原生编译**（Graviton 上 `cargo build` 几分钟搞定，
-> 比从 macOS 交叉编译省心；交叉编译要处理 ring/aws-lc-sys 的 C 工具链）。
-
-## EC2 (Amazon Linux 2023, aarch64) 部署步骤
+## 部署步骤
 
 1. 拉代码（务必含 `patches/aws-runtime/`，否则编译失败）：
    ```bash
-   git clone git@github.com:claw-works/kura-chan.git
+   git clone <仓库地址>
    cd kura-chan/kura-chan-server
    ```
 
-2. AWS 凭证：优先用 **EC2 实例角色**（需有调用该 harness 的 Bedrock AgentCore 权限），
-   没有则 `aws configure`。确认账号是 320236118172：
+2. AWS 凭证：优先用**实例角色**（需有调用该 harness 的 Bedrock AgentCore 权限），
+   没有则 `aws configure`，并确认账号正确：
    ```bash
    aws sts get-caller-identity
    ```
 
-3. 填环境变量：
+3. PostgreSQL：准备一个库，连接串填到下一步的 `DATABASE_URL`（服务端启动时自动建表 + seed）。
+
+4. 填环境变量：
    ```bash
    cp deploy/kura-server.env.example deploy/kura-server.env
-   # 编辑：填 VOLC_API_KEY 和 HARNESS_ARN；KURA_SERVER_PORT=8866 已预置
+   # 编辑：VOLC_API_KEY / HARNESS_ARN / DATABASE_URL / ADMIN_TOKEN，按需设 KURA_SERVER_PORT
    ```
 
-4. 编译并运行：
+5. 首次装环境（装 Rust + 系统编译依赖）：
    ```bash
-   bash deploy/setup.sh      # 装 Rust + 编译依赖(dnf) + cargo build --release
-   bash deploy/run.sh        # 日志出现 "listening on 0.0.0.0:8866" 即成功
+   bash deploy/setup.sh
+   ```
+
+6. 启动（后台；自动停旧实例 → 编译 → 起新实例 → 写 server.pid）：
+   ```bash
+   nohup bash deploy/run.sh >> nohup.log 2>&1 &
+   tail -f nohup.log          # 出现 "listening on 0.0.0.0:<port>" 即成功
+   kill $(cat server.pid)     # 停止
    ```
    开机自启（可选）见 `deploy/kura-chan-server.service`。
 
 ## 验证
 
 ```bash
-curl -i http://54.187.154.83:8866/ws/device   # 返回 400 = 服务端可达（在等 WS 升级）
+curl http://<host>:<port>/health           # 返回 ok
+curl -i http://<host>:<port>/ws/device      # 返回 400 = 服务端可达（在等 WS 升级）
 ```
-确认 EC2 安全组放开 TCP 8866 入站。通了之后设备（在有外网的 WiFi 上）会自动连上。
+公网部署时，确认机器防火墙 / 安全组 / 路由器端口转发放开了 `<port>` 入站。通了之后设备（在可达网络上）会自动连上。
 
-> 注意：EC2 在 us-west-2（美国），火山 ASR/TTS 在国内，跨太平洋往返会增加语音延迟，
-> 功能可用但偏慢；后续可换离用户更近的主机。
+## 注意
+
+- **地理延迟**：服务端离火山 ASR/TTS（国内）越远，语音往返越慢；主机尽量选离用户/火山近的地区。
+- **别让机器休眠**（macOS：`sudo pmset -a disablesleep 1`），否则设备连不上。
+- ⚠️ **安全**：数据库端口（5432 等）不要暴露公网；用 DMZ/端口转发时只放行必要端口、数据库绑 `127.0.0.1`、用强密码。`/ui/admin` 是高权限接口，`ADMIN_TOKEN` 设强口令、勿公网弱口令。
