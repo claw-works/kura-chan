@@ -6,6 +6,7 @@ pub struct Config {
     pub server: ServerConfig,
     pub auth: AuthConfig,
     pub aws: AwsConfig,
+    #[serde(default)]
     pub agent: AgentConfig,
     pub speech: SpeechConfig,
     pub session: SessionConfig,
@@ -93,8 +94,21 @@ impl Default for LlmConfig {
 /// invoke_harness call (overrides the harness default).
 #[derive(Debug, Deserialize, Clone)]
 pub struct AgentConfig {
-    #[serde(default)]
+    /// Common behaviour rules. The live value lives in the DB `common_rules`
+    /// template (admin-editable); this default (from config/common_rules.md) is
+    /// only used to seed the DB on first run and as a fallback.
+    #[serde(default = "d_system_prompt")]
     pub system_prompt: String,
+}
+
+fn d_system_prompt() -> String {
+    include_str!("../config/common_rules.md").trim().to_string()
+}
+
+impl Default for AgentConfig {
+    fn default() -> Self {
+        Self { system_prompt: d_system_prompt() }
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
