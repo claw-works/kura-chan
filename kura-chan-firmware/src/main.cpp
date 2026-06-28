@@ -855,15 +855,27 @@ void setup() {
     });
     {
         auto wifis = configStore.getWifiList();
-        if (!wifis.empty()) {
-            Serial.printf("[WiFi] connecting to '%s'...\n", wifis[0].ssid.c_str());
-            WiFi.begin(wifis[0].ssid.c_str(), wifis[0].password.c_str());
-        } else {
+        WiFi.mode(WIFI_STA);
+        WiFi.setAutoReconnect(true);
+        if (wifis.empty()) {
             WiFi.begin("YOUR_WIFI_SSID", "YOUR_WIFI_PASSWORD");
+        } else {
+            // Round-robin all configured networks: try each for up to 8s, switch
+            // to the next on timeout. (Previously only wifis[0] was ever tried.)
+            for (size_t i = 0; i < wifis.size(); i++) {
+                Serial.printf("[WiFi] connecting to '%s' (%d/%d)...\n",
+                              wifis[i].ssid.c_str(), (int)i + 1, (int)wifis.size());
+                WiFi.begin(wifis[i].ssid.c_str(), wifis[i].password.c_str());
+                uint32_t ts = millis();
+                while (WiFi.status() != WL_CONNECTED && millis() - ts < 8000) delay(100);
+                if (WiFi.status() == WL_CONNECTED) break;
+                Serial.printf("[WiFi] '%s' failed (status=%d), trying next\n",
+                              wifis[i].ssid.c_str(), WiFi.status());
+                WiFi.disconnect();
+                delay(100);
+            }
         }
     }
-    uint32_t t0 = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - t0 < 15000) delay(100);
     Serial.printf("[WiFi] result: status=%d ip=%s\n",
                   WiFi.status(), WiFi.localIP().toString().c_str());
     draw_status_bar();
