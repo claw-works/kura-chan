@@ -3,7 +3,7 @@
 让小爪(桌面伴侣机器人)能在对话中控制自身硬件、并感知自身状态。
 机制:大模型在回复文本里内联**标记**,服务端解析后剥离标记、把指令下发设备执行,设备状态则由设备上报、服务端注入到每轮上下文。
 
-不依赖 harness 的 function-calling,纯文本流即可工作。可把下面「提示词片段」配置到 server 的 `[agent].system_prompt`(当前做法)或远程 harness 的 system prompt。
+不依赖 harness 的 function-calling,纯文本流即可工作。下面「提示词片段」即公共行为规则,存于 DB `common_rules` 模板(admin 可热改;默认值在 `config/common_rules.md`)。
 
 ---
 

@@ -25,7 +25,7 @@ cd kura-chan-server
 cargo build                       # 确认 Finished,无 error
 VOLC_API_KEY=<key> HARNESS_ARN=<arn> RUST_LOG=info,kura_chan_server=debug \
   nohup ./target/debug/kura-chan-server > /tmp/kura-server.log 2>&1 &
-tail -f /tmp/kura-server.log      # 看到 "listening on 0.0.0.0:8080"
+tail -f /tmp/kura-server.log      # 看到 "listening on 0.0.0.0:26021"
 ```
 - [ ] 启动日志无 "harness_arn is empty" 警告
 - [ ] 记下新机器的局域网 IP:`ipconfig getifaddr en0`(或 `ifconfig`)
@@ -41,7 +41,7 @@ pio run -t upload --upload-port /dev/cu.usbmodemXXXX # 串口按实际
 设备 NVS 存的是旧 IP,必须重指向。串口(115200)发:
 ```
 server <新机器IP>     # 例 server 192.168.1.50
-port 8080
+port 26021
 config                # 核对
 reboot
 ```

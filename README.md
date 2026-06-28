@@ -29,7 +29,7 @@
 
 **对话**
 - 拍头开始录音，再拍一下发送；或说完停顿自动发送（自适应 VAD，可调灵敏度）。
-- STT（火山）→ LLM（AWS Bedrock AgentCore harness）→ TTS（火山），逐句合成流式播放。
+- STT（火山）→ LLM（可插拔：DeepSeek / AWS Bedrock AgentCore，见 `[llm]` 配置）→ TTS（火山），逐句合成流式播放。
 
 **角色与画面**
 - 角色立绘由**服务端预合成**（身体/发型/服装/配饰分层 → 合成 → 缩放 → `RGB565+A8`），设备作为单层透明 sprite 手动 alpha 叠加到固定背景，呼吸只动角色、背景不动（无撕裂）。
@@ -106,14 +106,15 @@ kura-chan/
 | 变量 | 说明 |
 |---|---|
 | `VOLC_API_KEY` | 火山 STT/TTS 密钥（必填，否则降级为 mock） |
-| `HARNESS_ARN` | AgentCore harness ARN（必填） |
+| `LLM_FORMAT` / `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` | LLM 后端选择与凭证（DeepSeek 用 openai-chat）|
+| `HARNESS_ARN` | AgentCore harness ARN（仅 `LLM_FORMAT=bedrock-harness` 时必填）|
 | `DATABASE_URL` | PostgreSQL 连接串，如 `postgres://user:pass@localhost:5432/kura` |
 | `AWS_REGION` | 默认 `us-west-2` |
 | `KURA_SERVER_PORT` | 监听端口（映射到 `config.server.port`） |
 | `ADMIN_TOKEN` | `/ui/admin` 的访问 token；**留空则 admin 接口全部 403** |
 | `RUST_LOG` | 日志级别 |
 
-**通用配置** `config/default.toml`：角色公共 `system_prompt`、`speech`（STT/TTS provider 与音色）、`session`、`growth`（养成数值曲线）。
+**通用配置** `config/default.toml`：`llm`（后端格式/调参）、`speech`（STT/TTS provider 与音色）、`session`、`growth`（养成数值曲线）。公共行为规则默认在 `config/common_rules.md`（DB `common_rules` 为权威）。
 
 ### 4.3 数据库
 启动时 `sqlx` 自动跑 `migrations/`，并 seed：扫 `assets/` 填 `catalog_items`、写入 `common_rules`、插入初始 `prompt_fragments`（仅当表为空，不覆盖已有编辑）。
@@ -194,7 +195,7 @@ pio device monitor -b 115200                   # 串口日志
 1. 设备拍头录音 → WebSocket 上行 PCM 帧。
 2. server VAD/收尾后做 STT → 得到文本。
 3. 取 actor 当前数值，从 PG **每轮重新组装** system_prompt（人格 + 公共规则 + 解锁片段 + 关系状态 + 可用物料）。
-4. 调 AgentCore harness 流式生成回复；解析其中标记：
+4. 调 LLM（DeepSeek / Bedrock，按 `LLM_FORMAT`）流式生成回复；解析其中标记：
    - `[mood:...]` 表情、`[do:wear|bg|blush|glasses=...]` 外观、`[task:...]` 定时、`[bond:±N]` 亲密度。
 5. 逐句 TTS 合成 → 下行音频帧；设备流式播放、口型/表情联动。
 6. 结算养成（xp/bond/energy），`Sync` 下发最新数值与外观，设备更新 HUD 与立绘。
