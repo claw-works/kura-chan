@@ -133,12 +133,13 @@ static volatile int ws_state = 0;  // 0 off, 1 connected, 2 ready
 // === Audio (PCM16 / 16kHz / mono) ===
 static constexpr uint32_t SAMPLE_RATE = 16000;
 static constexpr size_t REC_MAX_SAMPLES = SAMPLE_RATE * 30;   // up to 30s utterance
-static constexpr size_t PLAY_MAX_BYTES = SAMPLE_RATE * 2 * 20; // up to 20s playback
+static constexpr size_t PLAY_MAX_BYTES = SAMPLE_RATE * 2 * 120; // target up to 120s playback (auto-downsizes if PSRAM tight)
 static int16_t* rec_buf = nullptr;
 static uint8_t* play_buf = nullptr;
 static size_t rec_samples = 0;
 static size_t play_bytes = 0;                 // total PCM bytes received for current reply
 static size_t play_pos = 0;                   // bytes already fed to speaker
+static size_t play_cap = 0;                   // actual play_buf capacity (<=PLAY_MAX_BYTES; depends on PSRAM)
 static volatile bool server_done = false;     // server sent speak_done
 static volatile bool speaker_pending = false; // first audio arrived → switch to speaker
 static constexpr size_t PLAY_PIECE = 16000;   // feed speaker in ~0.5s pieces
@@ -554,7 +555,8 @@ static void handleAudioOutput(uint8_t* payload, size_t length) {
         speaker_pending = true;  // loop switches mic→speaker
     }
     size_t n = length - 4;
-    if (play_bytes + n > PLAY_MAX_BYTES) n = PLAY_MAX_BYTES - play_bytes;
+    if (play_bytes >= play_cap) n = 0;
+    else if (play_bytes + n > play_cap) n = play_cap - play_bytes;
     if (n > 0) {
         memcpy(play_buf + play_bytes, payload + 4, n);
         play_bytes += n;
@@ -831,7 +833,20 @@ void setup() {
 
     // Allocate audio buffers in PSRAM
     rec_buf = (int16_t*)heap_caps_malloc(REC_MAX_SAMPLES * sizeof(int16_t), MALLOC_CAP_SPIRAM);
-    play_buf = (uint8_t*)heap_caps_malloc(PLAY_MAX_BYTES, MALLOC_CAP_SPIRAM);
+    {
+        // Try the full target; step down 20s at a time if PSRAM can't satisfy it,
+        // so a tight heap degrades gracefully instead of returning null + crashing.
+        size_t want = PLAY_MAX_BYTES;
+        const size_t step = (size_t)SAMPLE_RATE * 2 * 20;
+        play_buf = (uint8_t*)heap_caps_malloc(want, MALLOC_CAP_SPIRAM);
+        while (!play_buf && want > step) {
+            want -= step;
+            play_buf = (uint8_t*)heap_caps_malloc(want, MALLOC_CAP_SPIRAM);
+        }
+        play_cap = play_buf ? want : 0;
+        Serial.printf("[Audio] play_buf=%u bytes (~%us)\n",
+                      (unsigned)play_cap, (unsigned)(play_cap / (SAMPLE_RATE * 2)));
+    }
     // Speaker on by default; switch to Mic only while recording.
     M5.Speaker.begin();
     M5.Speaker.setVolume(255);
