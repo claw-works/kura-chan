@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::harness::invoke::extract_text_delta;
+use futures_util::StreamExt;
 use crate::tasks::{now_unix, ScheduledTask, TaskAction};
 use crate::ws::codec::{AudioFrame, AUDIO_OUTPUT, FLAG_START};
 use crate::ws::protocol::{AgentResponse, ServerMessage, StateChange};
@@ -97,21 +97,19 @@ async fn run_agent(state: &Arc<AppState>, device_id: &str, prompt: &str) -> Resu
     let rules = state.config.agent.system_prompt.clone();
     let persona_full = format!("你的名字是{}。{}", actor.name, actor.persona.trim());
     let sp = format!("{}\n\n{}", persona_full.trim(), rules);
-    let mut output = state
-        .harness
-        .invoke_stream(prompt, &session, &actor.actor_id, &sp)
-        .await
-        .map_err(|e| format!("{e:?}"))?;
+    let req = crate::llm::LlmRequest {
+        system_prompt: sp,
+        messages: vec![crate::llm::ChatMessage::user(prompt)],
+        session_id: session.clone(),
+        actor_id: actor.actor_id.clone(),
+    };
+    let mut stream = state.llm.stream(req).await.map_err(|e| format!("{e:?}"))?;
     let mut buf = String::new();
     loop {
-        match output.stream.recv().await {
-            Ok(Some(event)) => {
-                if let Some(t) = extract_text_delta(&event) {
-                    buf.push_str(&t);
-                }
-            }
-            Ok(None) => break,
-            Err(e) => return Err(e.to_string()),
+        match stream.next().await {
+            Some(Ok(t)) => buf.push_str(&t),
+            Some(Err(e)) => return Err(e.to_string()),
+            None => break,
         }
     }
     let clean = strip_tags(&buf);

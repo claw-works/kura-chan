@@ -13,8 +13,7 @@ use futures_util::{SinkExt, StreamExt};
 use crate::config::Config;
 use crate::db::{self, Actor};
 use crate::error::AppError;
-use crate::harness::HarnessClient;
-use crate::harness::invoke::extract_text_delta;
+use crate::llm::{ChatMessage, LlmRequest, Role};
 use crate::speech::{SpeechToText, TextToSpeech};
 use crate::ws::codec::{AudioFrame, AUDIO_OUTPUT, FLAG_START};
 use crate::ws::protocol::*;
@@ -22,7 +21,7 @@ use crate::ws::session::{Session, SessionEvent, SessionState};
 
 pub struct AppState {
     pub config: Arc<Config>,
-    pub harness: HarnessClient,
+    pub llm: Box<dyn crate::llm::LlmProvider>,
     pub stt: Box<dyn SpeechToText>,
     pub tts: Box<dyn TextToSpeech>,
     /// Cache of synthesized canned phrases (phrase text -> PCM), so common
@@ -204,9 +203,18 @@ async fn handle_socket(socket: WebSocket, device_id: String, mut actor: Actor, s
                     let conv_session = db::get_or_create_session(&state.db, &actor.actor_id, session_ttl)
                         .await
                         .unwrap_or_else(|_| session.session_id.clone());
+                    // Conversation history (oldest→newest) before logging this
+                    // turn; fed to stateless providers (openai/anthropic).
+                    let history = db::get_recent_messages(
+                        &state.db,
+                        &conv_session,
+                        &actor.actor_id,
+                        (state.config.llm.history_turns as i64) * 2,
+                    )
+                    .await;
                     db::log_message(&state.db, &conv_session, &actor.actor_id, "user", &stt_text).await;
 
-                    // Stream the harness reply: synthesize + send sentence by sentence.
+                    // Stream the reply: synthesize + send sentence by sentence.
                     let user_message = session.build_user_message(&stt_text);
                     // Rebuild the system prompt each turn from the latest actor + PG
                     // content, so admin edits (prompts/growth) and bond/level changes
@@ -215,14 +223,25 @@ async fn handle_socket(socket: WebSocket, device_id: String, mut actor: Actor, s
                         actor = a;
                     }
                     let system_prompt = build_system_prompt(&state, &actor).await;
-                    let mut output = match state
-                        .harness
-                        .invoke_stream(&user_message, &conv_session, &actor.actor_id, &system_prompt)
-                        .await
-                    {
-                        Ok(o) => o,
+                    // history + current user message (current carries device-status injection)
+                    let mut messages: Vec<ChatMessage> = history
+                        .into_iter()
+                        .map(|m| ChatMessage {
+                            role: if m.role == "assistant" { Role::Assistant } else { Role::User },
+                            content: m.content,
+                        })
+                        .collect();
+                    messages.push(ChatMessage::user(user_message));
+                    let req = LlmRequest {
+                        system_prompt,
+                        messages,
+                        session_id: conv_session.clone(),
+                        actor_id: actor.actor_id.clone(),
+                    };
+                    let mut stream = match state.llm.stream(req).await {
+                        Ok(s) => s,
                         Err(e) => {
-                            tracing::error!(error = ?e, "Harness invoke failed");
+                            tracing::error!(error = ?e, "LLM invoke failed");
                             let audio = state.canned_audio(PHRASE_ERROR).await;
                             speak_phrase(&tx, &mut session, PHRASE_ERROR, "sad", &audio).await;
                             continue;
@@ -246,34 +265,32 @@ async fn handle_socket(socket: WebSocket, device_id: String, mut actor: Actor, s
                     let mut first = true;
                     let mut sent_any = false;
                     loop {
-                        match output.stream.recv().await {
-                            Ok(Some(event)) => {
-                                if let Some(t) = extract_text_delta(&event) {
-                                    buf.push_str(&t);
-                                    for msg in extract_tags(&mut buf, &device_id, &mut new_tasks, &mut want_new_session, &mut appearance_ops, &mut turn_growth) {
-                                        send_event(&tx, SessionEvent::SendJson(msg)).await;
-                                    }
-                                    while let Some(cut) = split_sentence(&buf) {
-                                        let seg: String = buf.drain(..cut).collect();
-                                        let seg = seg.trim();
-                                        if !seg.is_empty() && !seg.contains("[NOISE]") {
-                                            reply_text.push_str(seg);
-                                            let audio =
-                                                state.tts.synthesize(seg).await.unwrap_or_default();
-                                            if !audio.is_empty() {
-                                                send_audio_stream(&tx, &audio, first).await;
-                                                first = false;
-                                                sent_any = true;
-                                            }
+                        match stream.next().await {
+                            Some(Ok(t)) => {
+                                buf.push_str(&t);
+                                for msg in extract_tags(&mut buf, &device_id, &mut new_tasks, &mut want_new_session, &mut appearance_ops, &mut turn_growth) {
+                                    send_event(&tx, SessionEvent::SendJson(msg)).await;
+                                }
+                                while let Some(cut) = split_sentence(&buf) {
+                                    let seg: String = buf.drain(..cut).collect();
+                                    let seg = seg.trim();
+                                    if !seg.is_empty() && !seg.contains("[NOISE]") {
+                                        reply_text.push_str(seg);
+                                        let audio =
+                                            state.tts.synthesize(seg).await.unwrap_or_default();
+                                        if !audio.is_empty() {
+                                            send_audio_stream(&tx, &audio, first).await;
+                                            first = false;
+                                            sent_any = true;
                                         }
                                     }
                                 }
                             }
-                            Ok(None) => break,
-                            Err(e) => {
-                                tracing::error!(error = %e, "Harness stream error");
+                            Some(Err(e)) => {
+                                tracing::error!(error = %e, "LLM stream error");
                                 break;
                             }
+                            None => break,
                         }
                     }
                     // flush trailing text

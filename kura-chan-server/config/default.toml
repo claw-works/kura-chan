@@ -10,6 +10,17 @@ region = "us-west-2"
 # harness_arn 不入 git。请通过环境变量 HARNESS_ARN 设置(账号相关)。
 harness_arn = ""
 
+[llm]
+# 模型提供商格式: bedrock-harness | bedrock-converse | openai-chat | openai-responses | anthropic-messages
+# (当前已实现: bedrock-harness, openai-chat; 其余待实现)
+# base_url / api_key / model 不入 git, 通过环境变量设置:
+#   LLM_FORMAT / LLM_BASE_URL / LLM_API_KEY / LLM_MODEL  (可选 LLM_HISTORY_TURNS)
+# 例(DeepSeek): LLM_FORMAT=openai-chat LLM_BASE_URL=https://api.deepseek.com LLM_MODEL=deepseek-chat
+format = "bedrock-harness"
+history_turns = 20          # 传给无状态 provider(openai/anthropic) 的对话轮数
+temperature = 0.8
+max_tokens = 1024
+
 [agent]
 # Common behaviour rules appended after each actor's persona (which sets name + personality).
 system_prompt = """你是一个可爱的桌面伴侣机器人,住在一个小小的身体里,可以转动头部、改变表情、控制 LED 灯,还能播放声音。请始终保持上面设定的人设与名字。

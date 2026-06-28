@@ -263,6 +263,34 @@ pub async fn log_message(db: &Db, session_id: &str, actor_id: &str, role: &str, 
     .await;
 }
 
+/// Most recent `limit` messages of a session, returned oldest→newest.
+/// Used to feed history to stateless providers (openai/anthropic).
+#[derive(sqlx::FromRow)]
+pub struct MessageRow {
+    pub role: String,
+    pub content: String,
+}
+
+pub async fn get_recent_messages(
+    db: &Db,
+    session_id: &str,
+    actor_id: &str,
+    limit: i64,
+) -> Vec<MessageRow> {
+    let mut rows = sqlx::query_as::<_, MessageRow>(
+        "SELECT role, content FROM messages WHERE session_id=$1 AND actor_id=$2 \
+         ORDER BY id DESC LIMIT $3",
+    )
+    .bind(session_id)
+    .bind(actor_id)
+    .bind(limit)
+    .fetch_all(db)
+    .await
+    .unwrap_or_default();
+    rows.reverse();
+    rows
+}
+
 // ---- growth-driven content: prompt templates / fragments / catalog ----
 
 #[derive(Debug, Clone, sqlx::FromRow)]

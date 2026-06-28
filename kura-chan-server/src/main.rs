@@ -7,6 +7,7 @@ mod config;
 mod db;
 mod error;
 mod harness;
+mod llm;
 mod registry;
 mod router;
 mod seed;
@@ -21,7 +22,6 @@ use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
 
 use crate::config::Config;
-use crate::harness::HarnessClient;
 use crate::speech::mock_stt::MockStt;
 use crate::speech::mock_tts::MockTts;
 use crate::speech::volc::{VolcStt, VolcTts};
@@ -47,8 +47,10 @@ async fn main() {
     seed::run(&db, config.as_ref()).await;
     tracing::info!("Postgres connected + migrated");
 
-    let harness = HarnessClient::new(&config.aws).await;
-    tracing::info!("Harness client initialized");
+    let llm = llm::build_provider(&config)
+        .await
+        .expect("LLM provider init failed");
+    tracing::info!("LLM provider initialized");
 
     let stt = build_stt(&config);
     let tts = build_tts(&config);
@@ -63,7 +65,7 @@ async fn main() {
 
     let state = Arc::new(AppState {
         config: config.clone(),
-        harness,
+        llm,
         stt,
         tts,
         canned: tokio::sync::Mutex::new(std::collections::HashMap::new()),

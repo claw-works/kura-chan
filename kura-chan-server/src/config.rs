@@ -11,6 +11,8 @@ pub struct Config {
     pub session: SessionConfig,
     #[serde(default)]
     pub growth: GrowthConfig,
+    #[serde(default)]
+    pub llm: LlmConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -36,6 +38,48 @@ pub struct AwsConfig {
 
 fn default_region() -> String {
     "us-west-2".to_string()
+}
+
+/// LLM provider selection + tuning. `format` picks the backend; `base_url` /
+/// `api_key` / `model` come from env (LLM_BASE_URL / LLM_API_KEY / LLM_MODEL)
+/// for openai/anthropic-style providers. Sampling params live in default.toml.
+#[derive(Debug, Deserialize, Clone)]
+pub struct LlmConfig {
+    /// bedrock-harness | bedrock-converse | openai-chat | openai-responses | anthropic-messages
+    #[serde(default = "d_llm_format")]
+    pub format: String,
+    #[serde(default)]
+    pub base_url: String,
+    #[serde(default)]
+    pub api_key: String,
+    #[serde(default)]
+    pub model: String,
+    /// History turns sent to stateless providers (openai/anthropic).
+    #[serde(default = "d_history_turns")]
+    pub history_turns: u32,
+    #[serde(default = "d_temperature")]
+    pub temperature: f32,
+    #[serde(default = "d_max_tokens")]
+    pub max_tokens: u32,
+}
+
+fn d_llm_format() -> String { "bedrock-harness".to_string() }
+fn d_history_turns() -> u32 { 20 }
+fn d_temperature() -> f32 { 0.8 }
+fn d_max_tokens() -> u32 { 1024 }
+
+impl Default for LlmConfig {
+    fn default() -> Self {
+        Self {
+            format: d_llm_format(),
+            base_url: String::new(),
+            api_key: String::new(),
+            model: String::new(),
+            history_turns: d_history_turns(),
+            temperature: d_temperature(),
+            max_tokens: d_max_tokens(),
+        }
+    }
 }
 
 /// Agent persona / behaviour, injected as the system prompt on every
@@ -145,6 +189,26 @@ impl Config {
         }
         if let Ok(region) = std::env::var("AWS_REGION") {
             cfg.aws.region = region;
+        }
+        // LLM provider env overrides (kept out of committed config).
+        if let Ok(v) = std::env::var("LLM_FORMAT") {
+            if !v.is_empty() {
+                cfg.llm.format = v;
+            }
+        }
+        if let Ok(v) = std::env::var("LLM_BASE_URL") {
+            cfg.llm.base_url = v;
+        }
+        if let Ok(v) = std::env::var("LLM_API_KEY") {
+            cfg.llm.api_key = v;
+        }
+        if let Ok(v) = std::env::var("LLM_MODEL") {
+            cfg.llm.model = v;
+        }
+        if let Ok(v) = std::env::var("LLM_HISTORY_TURNS") {
+            if let Ok(n) = v.parse() {
+                cfg.llm.history_turns = n;
+            }
         }
         if cfg.aws.harness_arn.is_empty() {
             tracing::warn!(
