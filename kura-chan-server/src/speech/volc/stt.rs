@@ -117,7 +117,6 @@ impl VolcStt {
 
         // 3) read server responses, accumulate result text
         let mut text = String::new();
-        let mut logged_raw = false;
         while let Some(msg) = rx.next().await {
             match msg? {
                 Message::Binary(b) => {
@@ -131,13 +130,6 @@ impl VolcStt {
                             String::from_utf8_lossy(&frame.payload)
                         )
                         .into());
-                    }
-                    if !logged_raw {
-                        logged_raw = true;
-                        tracing::debug!(
-                            payload = %String::from_utf8_lossy(&frame.payload),
-                            "Volc ASR first response"
-                        );
                     }
                     if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&frame.payload) {
                         if let Some(t) = v
@@ -156,6 +148,7 @@ impl VolcStt {
                 _ => {}
             }
         }
+        tracing::info!(text = %text, "🎤 ASR recognized");
         Ok(text)
     }
 }

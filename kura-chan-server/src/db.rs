@@ -17,6 +17,7 @@ pub struct Actor {
     pub bond: i32,
     pub energy: i32,
     pub appearance: serde_json::Value,
+    pub voice: String,
 }
 
 pub fn hash_key(key: &str) -> String {
@@ -38,7 +39,7 @@ pub async fn connect(url: &str) -> Result<Db, sqlx::Error> {
     Ok(pool)
 }
 
-const ACTOR_COLS: &str = "actor_id, device_id, name, gender, persona, level, xp, bond, energy, appearance";
+const ACTOR_COLS: &str = "actor_id, device_id, name, gender, persona, level, xp, bond, energy, appearance, voice";
 
 /// XP required to clear `level` (per-level, superlinear): xp_base * L * (L+1).
 /// e.g. base=50 -> L1:100, L2:300, L3:600, L4:1000 — higher levels need more.
@@ -133,6 +134,16 @@ pub async fn update_persona(db: &Db, actor_id: &str, persona: &str) -> Result<()
     sqlx::query("UPDATE actors SET persona=$2, updated_at=now() WHERE actor_id=$1")
         .bind(actor_id)
         .bind(persona)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
+/// Set the actor's TTS voice ("provider/voiceid").
+pub async fn update_voice(db: &Db, actor_id: &str, voice: &str) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE actors SET voice=$2, updated_at=now() WHERE actor_id=$1")
+        .bind(actor_id)
+        .bind(voice)
         .execute(db)
         .await?;
     Ok(())
@@ -527,4 +538,120 @@ pub async fn admin_set_actor_growth(db: &Db, actor_id: &str, level: i32, bond: i
     sqlx::query("UPDATE actors SET level=$2, bond=$3, energy=$4, updated_at=now() WHERE actor_id=$1")
         .bind(actor_id).bind(level).bind(bond.clamp(0, 100)).bind(energy.clamp(0, 100))
         .execute(db).await.map(|r| r.rows_affected() > 0).unwrap_or(false)
+}
+
+// ===== Scheduled jobs (cron) — DB-backed =====
+
+use crate::tasks::ScheduledTask;
+
+#[derive(sqlx::FromRow)]
+struct JobRow {
+    id: String,
+    device_id: String,
+    action: serde_json::Value,
+    schedule: serde_json::Value,
+    enabled: bool,
+    next_fire: i64,
+    created_at: i64,
+}
+
+impl JobRow {
+    fn into_task(self) -> Option<ScheduledTask> {
+        Some(ScheduledTask {
+            id: self.id,
+            device_id: self.device_id,
+            action: serde_json::from_value(self.action).ok()?,
+            schedule: serde_json::from_value(self.schedule).ok()?,
+            enabled: self.enabled,
+            next_fire: self.next_fire,
+            created_at: self.created_at,
+        })
+    }
+}
+
+const JOB_COLS: &str = "id, device_id, action, schedule, enabled, next_fire, created_at";
+
+/// Insert a job for an actor. Returns the short job id assigned.
+pub async fn add_job(db: &Db, actor_id: &str, t: &ScheduledTask) -> Result<String, sqlx::Error> {
+    let id = format!("{:06x}", rand::random::<u32>() & 0x00ff_ffff);
+    let action = serde_json::to_value(&t.action).unwrap_or_default();
+    let schedule = serde_json::to_value(&t.schedule).unwrap_or_default();
+    sqlx::query(
+        "INSERT INTO jobs(id, actor_id, device_id, label, action, schedule, enabled, next_fire, created_at) \
+         VALUES($1,$2,$3,'',$4,$5,$6,$7,$8)",
+    )
+    .bind(&id)
+    .bind(actor_id)
+    .bind(&t.device_id)
+    .bind(action)
+    .bind(schedule)
+    .bind(t.enabled)
+    .bind(t.next_fire)
+    .bind(t.created_at)
+    .execute(db)
+    .await?;
+    Ok(id)
+}
+
+pub async fn list_jobs(db: &Db, actor_id: &str) -> Vec<ScheduledTask> {
+    sqlx::query_as::<_, JobRow>(&format!(
+        "SELECT {JOB_COLS} FROM jobs WHERE actor_id=$1 ORDER BY next_fire"
+    ))
+    .bind(actor_id)
+    .fetch_all(db)
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .filter_map(JobRow::into_task)
+    .collect()
+}
+
+pub async fn list_jobs_for_device(db: &Db, device_id: &str) -> Vec<ScheduledTask> {
+    sqlx::query_as::<_, JobRow>(&format!(
+        "SELECT {JOB_COLS} FROM jobs WHERE device_id=$1 ORDER BY next_fire"
+    ))
+    .bind(device_id)
+    .fetch_all(db)
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .filter_map(JobRow::into_task)
+    .collect()
+}
+
+pub async fn delete_job(db: &Db, id: &str) -> bool {
+    sqlx::query("DELETE FROM jobs WHERE id=$1")
+        .bind(id)
+        .execute(db)
+        .await
+        .map(|r| r.rows_affected() > 0)
+        .unwrap_or(false)
+}
+
+/// Fetch all enabled jobs due at `now`; reschedule (or delete one-shots) and
+/// return the fired snapshots for the executor.
+pub async fn take_due_jobs(db: &Db, now: i64) -> Vec<ScheduledTask> {
+    let rows = sqlx::query_as::<_, JobRow>(&format!(
+        "SELECT {JOB_COLS} FROM jobs WHERE enabled AND next_fire <= $1"
+    ))
+    .bind(now)
+    .fetch_all(db)
+    .await
+    .unwrap_or_default();
+    let mut due = Vec::new();
+    for row in rows {
+        let Some(mut t) = row.into_task() else { continue };
+        due.push(t.clone());
+        let alive = t.reschedule(now);
+        if alive {
+            let _ = sqlx::query("UPDATE jobs SET next_fire=$2 WHERE id=$1")
+                .bind(&t.id)
+                .bind(t.next_fire)
+                .execute(db)
+                .await;
+        } else {
+            let _ = sqlx::query("DELETE FROM jobs WHERE id=$1").bind(&t.id).execute(db).await;
+        }
+    }
+    due
 }

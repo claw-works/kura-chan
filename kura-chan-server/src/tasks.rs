@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -83,7 +81,7 @@ impl ScheduledTask {
     }
 
     /// Advance after firing. Returns false if the task is done (one-shot).
-    fn reschedule(&mut self, now: i64) -> bool {
+    pub fn reschedule(&mut self, now: i64) -> bool {
         match &self.schedule {
             Schedule::Once { .. } => {
                 self.enabled = false;
@@ -98,85 +96,5 @@ impl ScheduledTask {
                 true
             }
         }
-    }
-}
-
-/// File-backed task store (JSON). Swap for a DB when moving to SaaS.
-pub struct TaskStore {
-    path: PathBuf,
-    tasks: Mutex<Vec<ScheduledTask>>,
-}
-
-impl TaskStore {
-    /// Load tasks from `path` (creating an empty store if absent/invalid).
-    pub fn load(path: PathBuf) -> Self {
-        let tasks = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|s| serde_json::from_str::<Vec<ScheduledTask>>(&s).ok())
-            .unwrap_or_default();
-        tracing::info!(count = tasks.len(), path = %path.display(), "task store loaded");
-        Self { path, tasks: Mutex::new(tasks) }
-    }
-
-    fn persist(&self, tasks: &[ScheduledTask]) {
-        match serde_json::to_string_pretty(tasks) {
-            Ok(json) => {
-                if let Err(e) = std::fs::write(&self.path, json) {
-                    tracing::error!(error = %e, "failed to persist tasks");
-                }
-            }
-            Err(e) => tracing::error!(error = %e, "failed to serialize tasks"),
-        }
-    }
-
-    pub fn add(&self, task: ScheduledTask) -> ScheduledTask {
-        let mut guard = self.tasks.lock().unwrap();
-        guard.push(task.clone());
-        self.persist(&guard);
-        task
-    }
-
-    pub fn remove(&self, id: &str) -> bool {
-        let mut guard = self.tasks.lock().unwrap();
-        let before = guard.len();
-        guard.retain(|t| t.id != id);
-        let changed = guard.len() != before;
-        if changed {
-            self.persist(&guard);
-        }
-        changed
-    }
-
-    pub fn list(&self) -> Vec<ScheduledTask> {
-        self.tasks.lock().unwrap().clone()
-    }
-
-    pub fn list_for_device(&self, device_id: &str) -> Vec<ScheduledTask> {
-        self.tasks
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|t| t.device_id == device_id)
-            .cloned()
-            .collect()
-    }
-
-    /// Take all enabled tasks due at `now`, reschedule/disable them, persist, and
-    /// return the fired snapshots for the executor to act on.
-    pub fn take_due(&self, now: i64) -> Vec<ScheduledTask> {
-        let mut guard = self.tasks.lock().unwrap();
-        let mut due = Vec::new();
-        for t in guard.iter_mut() {
-            if t.enabled && t.next_fire <= now {
-                due.push(t.clone());
-                t.reschedule(now);
-            }
-        }
-        // drop disabled one-shots
-        guard.retain(|t| t.enabled);
-        if !due.is_empty() {
-            self.persist(&guard);
-        }
-        due
     }
 }

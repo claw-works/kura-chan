@@ -17,6 +17,7 @@ pub struct OpenaiChatProvider {
     model: String,
     temperature: f32,
     max_tokens: u32,
+    thinking: bool,
 }
 
 impl OpenaiChatProvider {
@@ -37,6 +38,7 @@ impl OpenaiChatProvider {
             model: cfg.model.clone(),
             temperature: cfg.temperature,
             max_tokens: cfg.max_tokens,
+            thinking: cfg.thinking,
         })
     }
 }
@@ -62,6 +64,11 @@ impl LlmProvider for OpenaiChatProvider {
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
         });
+        let mut body = body;
+        if !self.thinking {
+            // DeepSeek v4: disable reasoning for faster/cheaper replies.
+            body["thinking"] = json!({"type": "disabled"});
+        }
 
         let resp = self
             .http

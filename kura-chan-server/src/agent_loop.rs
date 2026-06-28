@@ -10,6 +10,7 @@ use crate::ws::AppState;
 
 const AUDIO_CHUNK: usize = 4096;
 const DEFAULT_HEARTBEAT_SECS: u64 = 600;
+const DEFAULT_JOB_POLL_SECS: u64 = 20;
 
 /// Heartbeat interval (seconds). Env override `HEARTBEAT_SECS`, default 600.
 /// This is an agent loop — slow on purpose; one tick may process many tasks.
@@ -21,46 +22,65 @@ fn heartbeat_secs() -> u64 {
         .unwrap_or(DEFAULT_HEARTBEAT_SECS)
 }
 
-/// The main agent loop: a slow heartbeat that self-maintains and drives the
-/// scheduled-task system. Spawned once at startup.
+/// Job-scheduler poll interval (seconds). Env override `JOB_POLL_SECS`, default 20.
+fn job_poll_secs() -> u64 {
+    std::env::var("JOB_POLL_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|n| *n >= 5)
+        .unwrap_or(DEFAULT_JOB_POLL_SECS)
+}
+
+/// Slow system-level heartbeat: online count, future health/credential hooks.
 pub async fn run(state: Arc<AppState>) {
     let secs = heartbeat_secs();
-    tracing::info!(interval_secs = secs, "agent loop started");
+    tracing::info!(interval_secs = secs, "heartbeat loop started");
     let mut tick = tokio::time::interval(Duration::from_secs(secs));
-    // skip the immediate first tick burst
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tick.tick().await;
         heartbeat(&state).await;
-        process_due_tasks(&state).await;
     }
 }
 
-/// Self-maintenance pass. Lightweight; heavy work belongs in tasks.
-async fn heartbeat(state: &Arc<AppState>) {
-    let online = state.registry.online_count();
-    let tasks = state.task_store.list().len();
-    tracing::info!(online_devices = online, tasks, "heartbeat");
-    // Future hooks: credential refresh, downstream health probe, metrics, etc.
-}
-
-/// Fire all tasks due now. Offline devices' tasks are skipped (already
-/// rescheduled by take_due; interval tasks will retry next tick).
-async fn process_due_tasks(state: &Arc<AppState>) {
-    let due = state.task_store.take_due(now_unix());
-    if due.is_empty() {
-        return;
-    }
-    tracing::info!(count = due.len(), "processing due tasks");
-    for task in due {
-        if !state.registry.is_online(&task.device_id) {
-            tracing::info!(task = %task.id, device = %task.device_id, "device offline; skip");
+/// Business-level job scheduler: a fast poll loop. Each tick pulls due jobs
+/// (atomically rescheduled in `take_due_jobs`) and spawns a task per job.
+/// A per-device lock serializes a device's jobs while different devices run
+/// concurrently (a device can only play one audio stream at a time).
+pub async fn run_jobs(state: Arc<AppState>) {
+    let secs = job_poll_secs();
+    tracing::info!(interval_secs = secs, "job scheduler started");
+    let mut tick = tokio::time::interval(Duration::from_secs(secs));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tick.tick().await;
+        let due = crate::db::take_due_jobs(&state.db, now_unix()).await;
+        if due.is_empty() {
             continue;
         }
-        if let Err(e) = execute(state, &task).await {
-            tracing::error!(task = %task.id, error = %e, "task execution failed");
+        tracing::info!(count = due.len(), "dispatching due jobs");
+        for job in due {
+            if !state.registry.is_online(&job.device_id) {
+                tracing::info!(job = %job.id, device = %job.device_id, "device offline; skip");
+                continue;
+            }
+            let st = state.clone();
+            tokio::spawn(async move {
+                let lock = st.device_lock(&job.device_id).await;
+                let _guard = lock.lock().await; // serialize this device's jobs
+                if let Err(e) = execute(&st, &job).await {
+                    tracing::error!(job = %job.id, error = %e, "job execution failed");
+                }
+            });
         }
     }
+}
+
+/// Self-maintenance pass. Lightweight; heavy work belongs in jobs.
+async fn heartbeat(state: &Arc<AppState>) {
+    let online = state.registry.online_count();
+    tracing::info!(online_devices = online, "heartbeat");
+    // Future hooks: credential refresh, downstream health probe, metrics, etc.
 }
 
 async fn execute(state: &Arc<AppState>, task: &ScheduledTask) -> Result<(), String> {
@@ -135,7 +155,11 @@ fn strip_tags(s: &str) -> String {
 /// Proactively speak text to a connected device: TTS + push as a full turn
 /// (state -> response -> audio frames -> speak_done -> idle).
 async fn speak_to_device(state: &Arc<AppState>, device_id: &str, text: &str) {
-    let audio = state.tts.synthesize(text).await.unwrap_or_default();
+    let voice = crate::db::actor_by_device(&state.db, device_id)
+        .await
+        .map(|a| a.voice)
+        .unwrap_or_default();
+    let audio = state.tts.synthesize(text, crate::speech::voice_id(&voice)).await.unwrap_or_default();
     if audio.is_empty() {
         tracing::warn!(device = device_id, "TTS produced no audio; skip push");
         return;

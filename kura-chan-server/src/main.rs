@@ -30,6 +30,11 @@ use crate::ws::AppState;
 
 #[tokio::main]
 async fn main() {
+    // reqwest(0.23 rustls) and the AWS SDK pull in multiple crypto backends, so
+    // rustls can't auto-pick a process default and panics on the first TLS
+    // handshake (e.g. calling the DeepSeek HTTPS API). Install one explicitly.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::from_default_env()
@@ -56,9 +61,6 @@ async fn main() {
     let tts = build_tts(&config);
 
     let registry = std::sync::Arc::new(registry::SessionRegistry::new());
-    let task_store = std::sync::Arc::new(tasks::TaskStore::load(
-        std::path::PathBuf::from("tasks.json"),
-    ));
     let workflow_store = std::sync::Arc::new(workflows::WorkflowStore::load(
         std::path::PathBuf::from("workflows.json"),
     ));
@@ -70,13 +72,15 @@ async fn main() {
         tts,
         canned: tokio::sync::Mutex::new(std::collections::HashMap::new()),
         registry,
-        task_store,
+        device_locks: tokio::sync::Mutex::new(std::collections::HashMap::new()),
         workflow_store,
         db,
     });
 
-    // Agent loop: slow heartbeat + scheduled-task scheduler (proactive push).
+    // Heartbeat: slow system-level loop. Job scheduler: business-level, polls
+    // due jobs and runs them (per-device serial, cross-device concurrent).
     tokio::spawn(agent_loop::run(state.clone()));
+    tokio::spawn(agent_loop::run_jobs(state.clone()));
 
     let app = router::create_router(state);
 

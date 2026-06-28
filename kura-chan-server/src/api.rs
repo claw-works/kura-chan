@@ -53,6 +53,9 @@ pub async fn register(
 pub struct UpdateMeReq {
     #[serde(default)]
     pub persona: Option<String>,
+    /// TTS voice "provider/voiceid", e.g. volc/zh_female_sajiaoxuemei_uranus_bigtts
+    #[serde(default)]
+    pub voice: Option<String>,
 }
 
 /// PUT /me  (Bearer api_key) — owner updates their own actor's persona.
@@ -66,6 +69,11 @@ pub async fn update_me(
         .map_err(|e| (StatusCode::UNAUTHORIZED, e))?;
     if let Some(p) = req.persona {
         crate::db::update_persona(&state.db, &actor.actor_id, &p)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
+    if let Some(v) = req.voice {
+        crate::db::update_voice(&state.db, &actor.actor_id, &v)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     }
@@ -91,15 +99,14 @@ pub struct ListQuery {
     pub device_id: Option<String>,
 }
 
-/// GET /tasks            -> all tasks
-/// GET /tasks?device_id= -> tasks for one device
+/// GET /tasks?device_id= -> jobs for one device (device_id required)
 pub async fn list_tasks(
     State(state): State<Arc<AppState>>,
     Query(q): Query<ListQuery>,
 ) -> Json<Vec<ScheduledTask>> {
     let tasks = match q.device_id {
-        Some(d) => state.task_store.list_for_device(&d),
-        None => state.task_store.list(),
+        Some(d) => crate::db::list_jobs_for_device(&state.db, &d).await,
+        None => Vec::new(),
     };
     Json(tasks)
 }
@@ -111,16 +118,18 @@ pub struct CreateTaskReq {
     pub schedule: Schedule,
 }
 
-/// POST /tasks  body: { device_id, action:{type:"say",text}|{type:"agent_prompt",prompt},
-///                      schedule:{type:"once",at}|{type:"interval",secs} }
+/// POST /tasks  body: { device_id, action, schedule }
 pub async fn create_task(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateTaskReq>,
 ) -> (StatusCode, Json<ScheduledTask>) {
-    let task = ScheduledTask::new(req.device_id, req.action, req.schedule);
-    let saved = state.task_store.add(task);
-    tracing::info!(task = %saved.id, device = %saved.device_id, "task created via HTTP");
-    (StatusCode::CREATED, Json(saved))
+    let task = ScheduledTask::new(req.device_id.clone(), req.action, req.schedule);
+    if let Some(actor) = crate::db::actor_by_device(&state.db, &req.device_id).await {
+        if let Ok(id) = crate::db::add_job(&state.db, &actor.actor_id, &task).await {
+            tracing::info!(job = %id, device = %req.device_id, "job created via HTTP");
+        }
+    }
+    (StatusCode::CREATED, Json(task))
 }
 
 /// DELETE /tasks/:id
@@ -128,7 +137,7 @@ pub async fn delete_task(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> StatusCode {
-    if state.task_store.remove(&id) {
+    if crate::db::delete_job(&state.db, &id).await {
         StatusCode::NO_CONTENT
     } else {
         StatusCode::NOT_FOUND

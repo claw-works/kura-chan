@@ -29,8 +29,9 @@ pub struct AppState {
     pub canned: tokio::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>,
     /// Connected devices, for proactive push from background tasks.
     pub registry: Arc<crate::registry::SessionRegistry>,
-    /// User-defined scheduled tasks (file-backed).
-    pub task_store: Arc<crate::tasks::TaskStore>,
+    /// Per-device async locks so a device's scheduled jobs run serially
+    /// (one audio stream at a time), while different devices run concurrently.
+    pub device_locks: tokio::sync::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Reusable request templates run through the harness (file-backed).
     pub workflow_store: Arc<crate::workflows::WorkflowStore>,
     /// Postgres pool (actors / sessions / messages).
@@ -43,14 +44,23 @@ pub const PHRASE_NOT_HEARD: &str = "诶？小爪没听清，再说一遍好不�
 pub const PHRASE_ERROR: &str = "呜，小爪的脑袋有点卡住了，等会儿再试试嘛。";
 
 impl AppState {
+    /// Get (or create) the per-device serialization lock.
+    pub async fn device_lock(&self, device_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut map = self.device_locks.lock().await;
+        map.entry(device_id.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    }
+
     /// Get cached PCM for a canned phrase, synthesizing+caching on first use.
-    pub async fn canned_audio(&self, text: &str) -> Vec<u8> {
-        if let Some(a) = self.canned.lock().await.get(text) {
+    pub async fn canned_audio(&self, text: &str, voice: &str) -> Vec<u8> {
+        let key = format!("{voice}\u{1}{text}");
+        if let Some(a) = self.canned.lock().await.get(&key) {
             return a.clone();
         }
-        let audio = self.tts.synthesize(text).await.unwrap_or_default();
+        let audio = self.tts.synthesize(text, voice).await.unwrap_or_default();
         if !audio.is_empty() {
-            self.canned.lock().await.insert(text.to_string(), audio.clone());
+            self.canned.lock().await.insert(key, audio.clone());
         }
         audio
     }
@@ -194,7 +204,7 @@ async fn handle_socket(socket: WebSocket, device_id: String, mut actor: Actor, s
                     // Couldn't transcribe (silence/noise): play a cached canned phrase.
                     if stt_text.trim().is_empty() {
                         tracing::info!("Empty STT, playing canned phrase");
-                        let audio = state.canned_audio(PHRASE_NOT_HEARD).await;
+                        let audio = state.canned_audio(PHRASE_NOT_HEARD, crate::speech::voice_id(&actor.voice)).await;
                         speak_phrase(&tx, &mut session, PHRASE_NOT_HEARD, "confused", &audio).await;
                         continue;
                     }
@@ -242,7 +252,7 @@ async fn handle_socket(socket: WebSocket, device_id: String, mut actor: Actor, s
                         Ok(s) => s,
                         Err(e) => {
                             tracing::error!(error = ?e, "LLM invoke failed");
-                            let audio = state.canned_audio(PHRASE_ERROR).await;
+                            let audio = state.canned_audio(PHRASE_ERROR, crate::speech::voice_id(&actor.voice)).await;
                             speak_phrase(&tx, &mut session, PHRASE_ERROR, "sad", &audio).await;
                             continue;
                         }
@@ -258,26 +268,36 @@ async fn handle_socket(socket: WebSocket, device_id: String, mut actor: Actor, s
 
                     let mut buf = String::new();
                     let mut new_tasks: Vec<crate::tasks::ScheduledTask> = Vec::new();
+                    let mut cancel_jobs: Vec<String> = Vec::new();
                     let mut appearance_ops: Vec<(String, serde_json::Value)> = Vec::new();
                     let mut turn_growth = TurnGrowth::default();
                     let mut reply_text = String::new();
+                    let mut raw_reply = String::new();   // raw LLM output incl. tags, for debugging
                     let mut want_new_session = false;
                     let mut first = true;
                     let mut sent_any = false;
                     loop {
                         match stream.next().await {
                             Some(Ok(t)) => {
+                                raw_reply.push_str(&t);
                                 buf.push_str(&t);
-                                for msg in extract_tags(&mut buf, &device_id, &mut new_tasks, &mut want_new_session, &mut appearance_ops, &mut turn_growth) {
+                                for msg in extract_tags(&mut buf, &device_id, &mut new_tasks, &mut want_new_session, &mut appearance_ops, &mut turn_growth, &mut cancel_jobs) {
                                     send_event(&tx, SessionEvent::SendJson(msg)).await;
                                 }
-                                while let Some(cut) = split_sentence(&buf) {
+                                // Only split sentences in the text BEFORE any pending (unclosed)
+                                // tag — extract_tags leaves an in-progress "[task:... " at the end,
+                                // and its say= text may contain 。！？ which would otherwise be
+                                // cut mid-tag and leak the marker into TTS.
+                                while let Some(cut) = {
+                                    let safe = buf.find('[').unwrap_or(buf.len());
+                                    split_sentence(&buf[..safe])
+                                } {
                                     let seg: String = buf.drain(..cut).collect();
                                     let seg = seg.trim();
                                     if !seg.is_empty() && !seg.contains("[NOISE]") {
                                         reply_text.push_str(seg);
                                         let audio =
-                                            state.tts.synthesize(seg).await.unwrap_or_default();
+                                            state.tts.synthesize(seg, crate::speech::voice_id(&actor.voice)).await.unwrap_or_default();
                                         if !audio.is_empty() {
                                             send_audio_stream(&tx, &audio, first).await;
                                             first = false;
@@ -294,35 +314,46 @@ async fn handle_socket(socket: WebSocket, device_id: String, mut actor: Actor, s
                         }
                     }
                     // flush trailing text
-                    for msg in extract_tags(&mut buf, &device_id, &mut new_tasks, &mut want_new_session, &mut appearance_ops, &mut turn_growth) {
+                    for msg in extract_tags(&mut buf, &device_id, &mut new_tasks, &mut want_new_session, &mut appearance_ops, &mut turn_growth, &mut cancel_jobs) {
                         send_event(&tx, SessionEvent::SendJson(msg)).await;
                     }
                     let rest = buf.trim().to_string();
                     if !rest.is_empty() && !rest.contains("[NOISE]") {
                         reply_text.push_str(&rest);
-                        let audio = state.tts.synthesize(&rest).await.unwrap_or_default();
+                        let audio = state.tts.synthesize(&rest, crate::speech::voice_id(&actor.voice)).await.unwrap_or_default();
                         if !audio.is_empty() {
                             send_audio_stream(&tx, &audio, first).await;
                             first = false;
                             sent_any = true;
                         }
                     }
+                    // raw LLM output (incl. [do:/mood:/bond:] tags) + the text actually spoken
+                    tracing::info!(raw = %raw_reply, "🧠 LLM raw output");
+                    tracing::info!(spoken = %reply_text, "🔊 TTS text");
                     // nothing intelligible → canned "not heard"
                     if !sent_any {
                         tracing::info!("No speakable reply, using canned phrase");
-                        let audio = state.canned_audio(PHRASE_NOT_HEARD).await;
+                        let audio = state.canned_audio(PHRASE_NOT_HEARD, crate::speech::voice_id(&actor.voice)).await;
                         send_audio_stream(&tx, &audio, first).await;
                     }
-                    // Persist any tasks the agent decided to create this turn.
+                    // Persist any jobs the agent created this turn, and cancel any it removed.
                     for t in new_tasks {
-                        let id = t.id.clone();
-                        state.task_store.add(t);
-                        tracing::info!(task = %id, device = %device_id, "task created via voice");
+                        match db::add_job(&state.db, &actor.actor_id, &t).await {
+                            Ok(id) => tracing::info!(job = %id, device = %device_id, "job created via voice"),
+                            Err(e) => tracing::error!(error = %e, "job create failed"),
+                        }
                     }
-                    // log assistant reply + roll session activity / reset
-                    let reply_text = reply_text.trim().to_string();
-                    if !reply_text.is_empty() {
-                        db::log_message(&state.db, &conv_session, &actor.actor_id, "assistant", &reply_text).await;
+                    for id in cancel_jobs {
+                        if db::delete_job(&state.db, &id).await {
+                            tracing::info!(job = %id, "job cancelled via voice");
+                        }
+                    }
+                    // Store the RAW reply (WITH [mood:/do:/bond:] tags) as history. A tagless
+                    // history makes the model mimic it and stop emitting tags; keeping the tags
+                    // in history keeps it emitting them. Tags in history are never re-executed.
+                    let assistant_msg = raw_reply.trim().to_string();
+                    if !assistant_msg.is_empty() {
+                        db::log_message(&state.db, &conv_session, &actor.actor_id, "assistant", &assistant_msg).await;
                     }
                     db::touch_session(&state.db, &conv_session).await;
                     // persist any server-owned appearance changes (bg/blush/glasses) the agent made
@@ -424,6 +455,7 @@ fn extract_tags(
     new_session: &mut bool,
     apps: &mut Vec<(String, serde_json::Value)>,
     growth: &mut TurnGrowth,
+    cancels: &mut Vec<String>,
 ) -> Vec<ServerMessage> {
     let mut out = Vec::new();
     let mut search = 0;
@@ -461,7 +493,10 @@ fn extract_tags(
             buf.replace_range(open..close + 1, "");
             search = open;
         } else if let Some(rest) = inner.strip_prefix("task:") {
-            if let Some(t) = parse_task(rest, device_id) {
+            if let Some(id) = rest.trim().strip_prefix("cancel=") {
+                // tolerate a leading '#' (the injected list shows ids as "#id")
+                cancels.push(id.trim().trim_start_matches('#').trim().to_string());
+            } else if let Some(t) = parse_task(rest, device_id) {
                 tasks.push(t);
             }
             buf.replace_range(open..close + 1, "");
@@ -654,14 +689,61 @@ async fn build_system_prompt(state: &AppState, actor: &Actor) -> String {
     let rel = format!("【当前状态】等级 Lv{}，亲密度 {}/100。", actor.level, actor.bond);
     let options =
         crate::assets::options_prompt(&state.db, &actor.gender, actor.level, actor.bond).await;
+    // Active jobs so the agent can answer "what reminders do I have" and cancel them.
+    let jobs = db::list_jobs(&state.db, &actor.actor_id).await;
+    let jobs_txt = if jobs.is_empty() {
+        "【当前定时任务】（无）".to_string()
+    } else {
+        let lines: Vec<String> = jobs
+            .iter()
+            .map(|j| format!("#{} {} — {}", j.id, describe_schedule(&j.schedule), describe_action(&j.action)))
+            .collect();
+        format!(
+            "【当前定时任务】(用户要取消某个时，输出 [task:cancel=对应ID])\n{}",
+            lines.join("\n")
+        )
+    };
+    // Critical output-format reminder, placed LAST so the model reliably follows it
+    // even with a long prompt (instructions buried mid-prompt get ignored).
+    let format_reminder = "————\n【输出格式·务必遵守】\n\
+        1. 每条回复都以情绪标记开头，如 [mood:happy]。\n\
+        2. 需要换装/发型/脸红/眼镜时输出 [do:wear=变体] / [do:blush=on] / [do:glasses=on]；\
+        去某地玩或换场景时输出 [do:bg=场景名]（场景名只能取上面【当前可用项】里列出的）。\n\
+        3. 按本轮互动用 [bond:+N] / [bond:-N]（节制）；遇到重要时刻用 [event:minor|major|epic]。\n\
+        这些方括号标记是给系统执行的、不会被朗读；不输出标记＝对应功能不会发生。";
     format!(
-        "{}\n\n{}\n\n{}\n\n{}\n\n{}",
+        "{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}",
         persona.trim(),
         rules.trim(),
         spirit.join("\n"),
         rel,
-        options
+        options,
+        jobs_txt,
+        format_reminder
     )
+}
+
+fn describe_schedule(s: &crate::tasks::Schedule) -> String {
+    use crate::tasks::Schedule::*;
+    match s {
+        Once { .. } => "一次性".to_string(),
+        Interval { secs } => {
+            if secs % 3600 == 0 { format!("每{}小时", secs / 3600) }
+            else if secs % 60 == 0 { format!("每{}分钟", secs / 60) }
+            else { format!("每{}秒", secs) }
+        }
+        Daily { hour, minute } => format!("每天{:02}:{:02}", hour, minute),
+    }
+}
+
+fn describe_action(a: &crate::tasks::TaskAction) -> String {
+    use crate::tasks::TaskAction::*;
+    let s = match a {
+        Say { text } => text.clone(),
+        AgentPrompt { prompt } => prompt.clone(),
+        Workflow { name, .. } => format!("workflow:{name}"),
+    };
+    s.chars().take(24).collect()
 }
 
 /// Build a Sync event. `full` includes appearance (used on connect to restore);

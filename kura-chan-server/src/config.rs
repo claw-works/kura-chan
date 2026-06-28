@@ -61,12 +61,18 @@ pub struct LlmConfig {
     pub temperature: f32,
     #[serde(default = "d_max_tokens")]
     pub max_tokens: u32,
+    /// Reasoning toggle for models that support it (DeepSeek v4).
+    /// `true` = let the model think (default); `false` = disable thinking for
+    /// faster/cheaper replies. Only emitted for openai-chat providers.
+    #[serde(default = "d_thinking")]
+    pub thinking: bool,
 }
 
 fn d_llm_format() -> String { "bedrock-harness".to_string() }
 fn d_history_turns() -> u32 { 20 }
 fn d_temperature() -> f32 { 0.8 }
 fn d_max_tokens() -> u32 { 1024 }
+fn d_thinking() -> bool { true }
 
 impl Default for LlmConfig {
     fn default() -> Self {
@@ -78,6 +84,7 @@ impl Default for LlmConfig {
             history_turns: d_history_turns(),
             temperature: d_temperature(),
             max_tokens: d_max_tokens(),
+            thinking: d_thinking(),
         }
     }
 }
@@ -209,6 +216,20 @@ impl Config {
             if let Ok(n) = v.parse() {
                 cfg.llm.history_turns = n;
             }
+        }
+        if let Ok(v) = std::env::var("LLM_MAX_TOKENS") {
+            if let Ok(n) = v.parse() {
+                cfg.llm.max_tokens = n;
+            }
+        }
+        if let Ok(v) = std::env::var("LLM_TEMPERATURE") {
+            if let Ok(n) = v.parse() {
+                cfg.llm.temperature = n;
+            }
+        }
+        if let Ok(v) = std::env::var("LLM_THINKING") {
+            let v = v.trim().to_ascii_lowercase();
+            cfg.llm.thinking = !(v == "false" || v == "0" || v == "off" || v == "disabled");
         }
         if cfg.aws.harness_arn.is_empty() {
             tracing::warn!(

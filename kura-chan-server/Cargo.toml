@@ -26,6 +26,8 @@ rand = "0.8"
 hex = "0.4"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+# pin a single rustls crypto backend so the process can install a default provider
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
 async-trait = "0.1"
 async-stream = "0.3"
 

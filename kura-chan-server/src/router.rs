@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
+use axum::extract::State;
 use axum::routing::{delete, get, put};
-use axum::Router;
+use axum::{Json, Router};
 
 use crate::admin;
 use crate::api;
@@ -38,6 +39,15 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .with_state(state)
 }
 
-async fn health() -> &'static str {
-    "ok"
+async fn health(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let llm = &state.config.llm;
+    Json(serde_json::json!({
+        "status": "ok",
+        "llm": {
+            "format": llm.format,
+            "model": llm.model,
+            "thinking": llm.thinking,
+            "max_tokens": llm.max_tokens,
+        }
+    }))
 }

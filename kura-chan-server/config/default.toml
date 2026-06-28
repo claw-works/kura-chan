@@ -19,7 +19,8 @@ harness_arn = ""
 format = "bedrock-harness"
 history_turns = 20          # 传给无状态 provider(openai/anthropic) 的对话轮数
 temperature = 0.8
-max_tokens = 1024
+max_tokens = 4096           # 输出上限(DeepSeek v4 支持很大; 语音回复其实很短, 这里放宽即可)
+thinking = false            # DeepSeek v4: false=关闭思考, 响应更快更省 token(仅 openai-chat 生效)
 
 [agent]
 # Common behaviour rules appended after each actor's persona (which sets name + personality).

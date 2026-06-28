@@ -34,7 +34,7 @@ impl VolcTts {
         }
     }
 
-    async fn run(&self, text: &str) -> Result<Vec<u8>, BoxError> {
+    async fn run(&self, text: &str, voice: &str) -> Result<Vec<u8>, BoxError> {
         let mut req = ENDPOINT.into_client_request()?;
         {
             let h = req.headers_mut();
@@ -62,7 +62,7 @@ impl VolcTts {
             "user": { "uid": "kura-chan" },
             "req_params": {
                 "text": text,
-                "speaker": self.voice,
+                "speaker": if voice.is_empty() { self.voice.as_str() } else { voice },
                 "audio_params": { "format": "pcm", "sample_rate": 16000 }
             }
         });
@@ -117,9 +117,10 @@ impl TextToSpeech for VolcTts {
     fn synthesize<'a>(
         &'a self,
         text: &'a str,
+        voice: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, BoxError>> + Send + 'a>> {
         Box::pin(async move {
-            match tokio::time::timeout(Duration::from_secs(20), self.run(text)).await {
+            match tokio::time::timeout(Duration::from_secs(20), self.run(text, voice)).await {
                 Ok(r) => r,
                 Err(_) => Err("volc tts timeout".into()),
             }

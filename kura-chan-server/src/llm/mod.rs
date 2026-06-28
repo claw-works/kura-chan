@@ -84,7 +84,14 @@ impl FromStr for LlmFormat {
 /// implemented today; the rest are reserved for later.
 pub async fn build_provider(config: &Config) -> Result<Box<dyn LlmProvider>, BoxError> {
     let fmt: LlmFormat = config.llm.format.parse()?;
-    tracing::info!(format = %config.llm.format, "LLM provider");
+    tracing::info!(
+        format = %config.llm.format,
+        model = %config.llm.model,
+        thinking = config.llm.thinking,
+        max_tokens = config.llm.max_tokens,
+        temperature = config.llm.temperature,
+        "LLM provider"
+    );
     match fmt {
         LlmFormat::BedrockHarness => {
             Ok(Box::new(bedrock_harness::BedrockHarnessProvider::new(&config.aws).await))

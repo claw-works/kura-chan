@@ -9,6 +9,7 @@ impl TextToSpeech for MockTts {
     fn synthesize<'a>(
         &'a self,
         text: &'a str,
+        _voice: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>>> + Send + 'a>>
     {
         Box::pin(async move {
