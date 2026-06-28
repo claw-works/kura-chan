@@ -211,5 +211,14 @@ pio device monitor -b 115200                   # 串口日志
 ---
 
 ## 8. 文档
-- [数值驱动内容设计](docs/growth-content-design.md)
+
+**当前**
+- [数值驱动内容设计](docs/growth-content-design.md) — level/bond 驱动视觉与人格
+- [设备控制机制](docs/skill-device-control.md) — 对话内标记控制硬件 / 感知状态
 - [服务端部署](kura-chan-server/deploy/README.md)
+
+**运维 / 交接**
+- [工作交接 / 当前状态](docs/HANDOFF.md)
+- [换机首次启动 Checklist](docs/CHECKLIST-new-machine.md)
+
+**历史存档**（过时设计稿 + AI 协作产物，仅参考）：[`docs/archive/`](docs/archive/)
