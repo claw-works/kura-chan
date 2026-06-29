@@ -77,6 +77,35 @@ pub fn run() {
                     }
                 })
                 .build(app)?;
+
+            // Pointer hover via global cursor polling — fires even when the window
+            // is NOT focused. A non-key macOS window doesn't receive mouse-moved
+            // events, so CSS :hover / mouseenter alone wouldn't work for a
+            // background desktop pet.
+            let app2 = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                use tauri::Emitter;
+                let mut inside = false;
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    let Some(win) = app2.get_webview_window("main") else {
+                        continue;
+                    };
+                    let (Ok(cur), Ok(pos), Ok(size)) =
+                        (app2.cursor_position(), win.outer_position(), win.outer_size())
+                    else {
+                        continue;
+                    };
+                    let now_inside = cur.x >= pos.x as f64
+                        && cur.x <= pos.x as f64 + size.width as f64
+                        && cur.y >= pos.y as f64
+                        && cur.y <= pos.y as f64 + size.height as f64;
+                    if now_inside != inside {
+                        inside = now_inside;
+                        let _ = win.emit("hover", now_inside);
+                    }
+                }
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

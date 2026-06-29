@@ -316,17 +316,19 @@ async function init() {
     }
   });
 
-  // hover expands the window (character stays put); collapse on leave
-  const app = el("#app");
-  app.addEventListener("mouseenter", () => void applyWindow(true));
-  app.addEventListener("mouseleave", () => {
-    const input = el("#chat-input") as HTMLInputElement;
-    if (document.activeElement === input || recording) return;
-    if (textOpen) {
-      textOpen = false;
-      form.classList.add("hidden");
+  // pointer hover via global cursor polling (works even when window isn't focused)
+  await listen<boolean>("hover", (e) => {
+    if (e.payload) {
+      void applyWindow(true);
+    } else {
+      const input = el("#chat-input") as HTMLInputElement;
+      if (document.activeElement === input || recording) return;
+      if (textOpen) {
+        textOpen = false;
+        form.classList.add("hidden");
+      }
+      void applyWindow(false);
     }
-    void applyWindow(false);
   });
 
   // menu: voice / text / sizes / settings / close
