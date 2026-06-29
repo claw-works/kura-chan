@@ -9,19 +9,25 @@ use uuid::Uuid;
 pub enum Schedule {
     /// Fire once at this unix timestamp (seconds), then disable.
     Once { at: i64 },
-    /// Fire every `secs` seconds, starting `secs` from creation.
-    Interval { secs: u64 },
-    /// Fire every day at this Beijing (UTC+8) wall-clock time.
-    Daily { hour: u32, minute: u32 },
+    /// Recurring, by a standard 5-field cron expression evaluated in Beijing
+    /// (UTC+8) time, e.g. "*/30 9-18 * * 1-5" (every 30min, 9–18h, Mon–Fri).
+    Cron { expr: String },
 }
 
-/// Next unix-second for a daily Beijing-time hh:mm (today if still ahead, else tomorrow).
-fn next_daily(hour: u32, minute: u32) -> i64 {
-    let bj = now_unix() + 8 * 3600;
-    let day = bj.div_euclid(86400);
-    let target = day * 86400 + (hour as i64) * 3600 + (minute as i64) * 60;
-    let next_bj = if target > bj { target } else { target + 86400 };
-    next_bj - 8 * 3600
+/// Next unix-second a cron expression fires strictly after `after_unix`
+/// (Beijing time). Returns None if the expression is invalid.
+pub fn cron_next(expr: &str, after_unix: i64) -> Option<i64> {
+    use chrono::{FixedOffset, TimeZone};
+    let cron = croner::Cron::new(expr).parse().ok()?;
+    let bj = FixedOffset::east_opt(8 * 3600)?;
+    let after = bj.timestamp_opt(after_unix, 0).single()?;
+    let next = cron.find_next_occurrence(&after, false).ok()?;
+    Some(next.timestamp())
+}
+
+/// Whether a cron expression is parseable / schedulable.
+pub fn cron_valid(expr: &str) -> bool {
+    cron_next(expr, now_unix()).is_some()
 }
 
 /// What to do when the task fires.
@@ -66,8 +72,7 @@ impl ScheduledTask {
         let now = now_unix();
         let next_fire = match &schedule {
             Schedule::Once { at } => *at,
-            Schedule::Interval { secs } => now + *secs as i64,
-            Schedule::Daily { hour, minute } => next_daily(*hour, *minute),
+            Schedule::Cron { expr } => cron_next(expr, now).unwrap_or(i64::MAX),
         };
         Self {
             id: format!("task_{}", Uuid::new_v4().simple()),
@@ -80,21 +85,24 @@ impl ScheduledTask {
         }
     }
 
-    /// Advance after firing. Returns false if the task is done (one-shot).
+    /// Advance after firing. Returns false if the task is done (one-shot or a
+    /// cron expression that no longer yields a next time).
     pub fn reschedule(&mut self, now: i64) -> bool {
         match &self.schedule {
             Schedule::Once { .. } => {
                 self.enabled = false;
                 false
             }
-            Schedule::Interval { secs } => {
-                self.next_fire = now + *secs as i64;
-                true
-            }
-            Schedule::Daily { hour, minute } => {
-                self.next_fire = next_daily(*hour, *minute);
-                true
-            }
+            Schedule::Cron { expr } => match cron_next(expr, now) {
+                Some(next) => {
+                    self.next_fire = next;
+                    true
+                }
+                None => {
+                    self.enabled = false;
+                    false
+                }
+            },
         }
     }
 }

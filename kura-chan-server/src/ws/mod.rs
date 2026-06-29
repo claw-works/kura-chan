@@ -539,7 +539,7 @@ fn parse_task(s: &str, device_id: &str) -> Option<crate::tasks::ScheduledTask> {
             if let Some((k, v)) = tok.split_once('=') {
                 match k {
                     "workflow" => name = Some(v.to_string()),
-                    "in" | "every" | "daily" => {} // schedule keys
+                    "in" | "cron" => {} // schedule keys
                     _ => {
                         params.insert(k.to_string(), v.to_string());
                     }
@@ -559,30 +559,24 @@ fn parse_task(s: &str, device_id: &str) -> Option<crate::tasks::ScheduledTask> {
     Some(ScheduledTask::new(device_id.to_string(), action, schedule))
 }
 
-/// Parse the schedule from the tokens (`daily=HH:MM` / `every=N` / `in=N`).
+/// Parse the schedule: `cron=<5 fields>` (recurring) or `in=N` (one-shot, N secs from now).
 fn parse_schedule(s: &str) -> Option<crate::tasks::Schedule> {
-    use crate::tasks::{now_unix, Schedule};
-    if let Some((h, m)) = grab_daily(s) {
-        return Some(Schedule::Daily { hour: h, minute: m });
-    }
-    if let Some(secs) = grab_num(s, "every=") {
-        return Some(Schedule::Interval { secs });
+    use crate::tasks::{cron_valid, now_unix, Schedule};
+    if let Some(i) = s.find("cron=") {
+        // a standard cron expression is 5 whitespace-separated fields
+        let fields: Vec<&str> = s[i + 5..].split_whitespace().take(5).collect();
+        if fields.len() == 5 {
+            let expr = fields.join(" ");
+            if cron_valid(&expr) {
+                return Some(Schedule::Cron { expr });
+            }
+        }
+        return None;
     }
     if let Some(secs) = grab_num(s, "in=") {
         return Some(Schedule::Once { at: now_unix() + secs as i64 });
     }
     None
-}
-
-/// Parse `daily=HH:MM` -> (hour, minute).
-fn grab_daily(s: &str) -> Option<(u32, u32)> {
-    let i = s.find("daily=")? + 6;
-    let tok: String = s[i..]
-        .chars()
-        .take_while(|c| c.is_ascii_digit() || *c == ':')
-        .collect();
-    let (h, m) = tok.split_once(':')?;
-    Some((h.parse().ok()?, m.parse().ok()?))
 }
 
 /// Grab the unsigned integer following `key` in `s` (e.g. key="in=" -> 3600).
@@ -726,13 +720,14 @@ async fn build_system_prompt(state: &AppState, actor: &Actor) -> String {
 fn describe_schedule(s: &crate::tasks::Schedule) -> String {
     use crate::tasks::Schedule::*;
     match s {
-        Once { .. } => "一次性".to_string(),
-        Interval { secs } => {
-            if secs % 3600 == 0 { format!("每{}小时", secs / 3600) }
-            else if secs % 60 == 0 { format!("每{}分钟", secs / 60) }
-            else { format!("每{}秒", secs) }
+        Once { at } => {
+            use chrono::{FixedOffset, TimeZone};
+            FixedOffset::east_opt(8 * 3600)
+                .and_then(|bj| bj.timestamp_opt(*at, 0).single())
+                .map(|dt| format!("一次性 {}", dt.format("%m-%d %H:%M")))
+                .unwrap_or_else(|| "一次性".to_string())
         }
-        Daily { hour, minute } => format!("每天{:02}:{:02}", hour, minute),
+        Cron { expr } => format!("cron[{expr}]"),
     }
 }
 
