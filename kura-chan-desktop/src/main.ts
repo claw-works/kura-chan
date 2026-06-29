@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { getCurrentWindow, LogicalSize, LogicalPosition } from "@tauri-apps/api/window";
+import { getCurrentWindow, LogicalSize, LogicalPosition, currentMonitor } from "@tauri-apps/api/window";
 
 let httpBase = "http://127.0.0.1:18099";
 let gender = "girl";
@@ -23,6 +23,8 @@ const FORM_H = 48; // text input row (when open)
 let sizeIdx = 1;
 let expanded = false;
 let curW = 0; // tracked current window logical width
+let curCH = 0; // tracked current control height (0 when collapsed)
+let curMode: "collapsed" | "down" | "up" = "collapsed";
 let textOpen = false;
 
 function petDims(): [number, number] {
@@ -35,20 +37,48 @@ function ctrlH(): number {
 async function applyWindow(expand: boolean) {
   const win = getCurrentWindow();
   const [pw, ph] = petDims();
-  document.documentElement.style.setProperty("--pet-h", ph + "px");
-  document.documentElement.style.setProperty("--ctrl-h", (expand ? ctrlH() : 0) + "px");
+  const ch = expand ? ctrlH() : 0;
   const newW = expand ? Math.max(pw, CTRL_W) : pw;
-  const newH = expand ? ph + ctrlH() : ph;
+  const newH = ph + ch;
   try {
     const pos = await win.outerPosition();
     const sf = await win.scaleFactor();
     const lx = pos.x / sf;
     const ly = pos.y / sf;
-    const prevW = curW || newW;
-    const nx = lx + prevW / 2 - newW / 2; // keep character horizontally centered
+    // Reconstruct the pet's fixed screen rect from the current window + mode, so
+    // it stays put across collapse/expand/size/direction changes.
+    const petCenterX = lx + (curW || newW) / 2;
+    const petTop = curMode === "up" ? ly + curCH : ly;
+
+    // Edge detection: if there's not enough room below the pet, open controls
+    // ABOVE it (window grows upward) instead of clipping off-screen.
+    let ctrlTop = false;
+    if (expand && ch > 0) {
+      try {
+        const mon = await currentMonitor();
+        if (mon) {
+          const msf = mon.scaleFactor || sf;
+          const screenBottom = (mon.position.y + mon.size.height) / msf;
+          ctrlTop = petTop + ph + ch + 8 > screenBottom;
+        }
+      } catch {
+        /* no monitor info → default downward */
+      }
+    }
+
+    const winLeft = petCenterX - newW / 2;
+    const winTop = ctrlTop ? petTop - ch : petTop;
+
+    document.documentElement.style.setProperty("--pet-h", ph + "px");
+    document.documentElement.style.setProperty("--ctrl-h", ch + "px");
+    document.body.classList.toggle("ctrl-top", ctrlTop);
+
     await win.setSize(new LogicalSize(newW, newH));
-    if (curW) await win.setPosition(new LogicalPosition(Math.round(nx), Math.round(ly)));
+    if (curW) await win.setPosition(new LogicalPosition(Math.round(winLeft), Math.round(winTop)));
+
     curW = newW;
+    curCH = ch;
+    curMode = !expand ? "collapsed" : ctrlTop ? "up" : "down";
     expanded = expand;
   } catch (err) {
     console.error("applyWindow failed", err);
