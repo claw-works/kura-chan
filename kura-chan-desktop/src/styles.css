@@ -4,12 +4,17 @@
   padding: 0;
 }
 
+html,
+body {
+  background: transparent;
+}
+
 body {
   font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
-  background: #1a1a1e;
-  color: #eee;
+  color: #fff;
   height: 100vh;
   overflow: hidden;
+  user-select: none;
 }
 
 #app {
@@ -18,68 +23,74 @@ body {
   flex-direction: column;
   align-items: center;
   justify-content: flex-end;
-  padding: 16px;
-  gap: 12px;
+  padding: 10px;
+  gap: 10px;
+  background: transparent;
 }
 
 .status {
   position: fixed;
-  top: 8px;
-  left: 12px;
-  font-size: 12px;
-  color: #888;
+  top: 6px;
+  left: 10px;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.65);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
 }
 
 .portrait {
   flex: 1;
   min-height: 0;
-  max-height: 60vh;
+  max-height: 72vh;
   object-fit: contain;
+  -webkit-user-drag: none;
+  filter: drop-shadow(0 6px 16px rgba(0, 0, 0, 0.35));
 }
 
 .bubble {
-  max-width: 90%;
-  min-height: 24px;
-  background: rgba(255, 255, 255, 0.08);
+  max-width: 95%;
+  background: rgba(20, 20, 24, 0.78);
   border-radius: 14px;
-  padding: 10px 16px;
-  font-size: 16px;
+  padding: 8px 14px;
+  font-size: 15px;
   line-height: 1.5;
   text-align: center;
+  backdrop-filter: blur(6px);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+}
+.bubble:empty {
+  display: none;
 }
 
 .chat {
   display: flex;
-  gap: 8px;
+  gap: 6px;
   width: 100%;
-  max-width: 480px;
+  max-width: 340px;
 }
 
 .chat input {
   flex: 1;
-  padding: 10px 14px;
+  padding: 8px 12px;
   border-radius: 10px;
-  border: 1px solid #333;
-  background: #25252b;
-  color: #eee;
-  font-size: 15px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  background: rgba(30, 30, 36, 0.85);
+  color: #fff;
+  font-size: 14px;
   outline: none;
 }
-
 .chat input:focus {
-  border-color: #66aa88;
+  border-color: rgba(102, 187, 153, 0.8);
 }
 
 .chat button {
-  padding: 10px 18px;
+  padding: 8px 14px;
   border-radius: 10px;
   border: none;
-  background: #55aa88;
+  background: rgba(85, 170, 136, 0.9);
   color: #fff;
-  font-size: 15px;
+  font-size: 14px;
   cursor: pointer;
 }
-
 .chat button:hover {
-  background: #66bb99;
+  background: rgba(102, 187, 153, 1);
 }
