@@ -42,10 +42,12 @@ function loadPortrait() {
   // Use the shared actor's appearance from the server; fall back to a dressed
   // default so we never render the bare (bald/naked) base body.
   const hairBack = variant(a.hair_back, "hair_back") || "short_black";
-  const hairFront = variant(a.hair_front, "hair_front");
+  // front hair matches back hair (front/back halves of the same hairstyle);
+  // fall back to the back-hair variant so the fringe is never missing.
+  const hairFront = variant(a.hair_front, "hair_front") || hairBack;
   const costume = variant(a.costume, "costume") || "jacket";
   p.set("hair_back", hairBack);
-  if (hairFront) p.set("hair_front", hairFront);
+  p.set("hair_front", hairFront);
   p.set("costume", costume);
   if (a.blush === true || (typeof a.blush === "string" && a.blush)) {
     p.set("blush", typeof a.blush === "string" ? variant(a.blush, "blush") || "faint" : "faint");
