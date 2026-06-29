@@ -34,8 +34,12 @@ body {
   height: var(--pet-h, 200px);
   display: flex;
   align-items: center;
-  justify-content: flex-start;
+  justify-content: center;
   animation: breathe 4s ease-in-out infinite;
+}
+/* hidden while window geometry settles, to avoid a visible jump on expand */
+body.settling #app {
+  visibility: hidden;
 }
 /* edge detection: when controls open ABOVE the pet (near screen bottom) */
 body.ctrl-top #stage {

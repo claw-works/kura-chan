@@ -22,6 +22,7 @@ const MENU_H = 40; // menu row
 const FORM_H = 48; // text input row (when open)
 let sizeIdx = 1;
 let expanded = false;
+let curWinW = 0; // tracked current window logical width
 let curCH = 0; // tracked current control height (0 when collapsed)
 let curMode: "collapsed" | "down" | "up" = "collapsed";
 let textOpen = false;
@@ -44,13 +45,11 @@ async function applyWindow(expand: boolean) {
     const sf = await win.scaleFactor();
     const lx = pos.x / sf;
     const ly = pos.y / sf;
-    // Pet is LEFT-anchored in the window (no horizontal centering) so a width
-    // change needs no setPosition → no flicker. Reconstruct the pet's screen
-    // top-left from the current window + mode.
-    const petX = lx;
-    const petY = curMode === "up" ? ly + curCH : ly;
+    // pet is horizontally centered; reconstruct its fixed screen center/top
+    const petCenterX = lx + (curWinW || newW) / 2;
+    const petTop = curMode === "up" ? ly + curCH : ly;
 
-    // edge detection: open controls above the pet if there's no room below
+    // edge detection: open controls above the pet if no room below
     let ctrlTop = false;
     if (expand && ch > 0) {
       try {
@@ -58,31 +57,33 @@ async function applyWindow(expand: boolean) {
         if (mon) {
           const msf = mon.scaleFactor || sf;
           const screenBottom = (mon.position.y + mon.size.height) / msf;
-          ctrlTop = petY + ph + ch + 8 > screenBottom;
+          ctrlTop = petTop + ph + ch + 8 > screenBottom;
         }
       } catch {
         /* default downward */
       }
     }
 
-    const winX = petX;
-    const winY = ctrlTop ? petY - ch : petY;
+    const winX = petCenterX - newW / 2;
+    const winY = ctrlTop ? petTop - ch : petTop;
 
+    // Hide content while we resize+move, then reveal after layout settles —
+    // the geometry jump happens invisibly so the menu never appears to jump.
+    document.body.classList.add("settling");
     document.documentElement.style.setProperty("--pet-h", ph + "px");
     document.documentElement.style.setProperty("--ctrl-h", ch + "px");
     document.body.classList.toggle("ctrl-top", ctrlTop);
-
     await win.setSize(new LogicalSize(newW, newH));
-    // only move when the top-left actually changes (i.e. opening upward); the
-    // common down-expand keeps the same top-left → no setPosition, no flicker.
-    if (Math.round(winX) !== Math.round(lx) || Math.round(winY) !== Math.round(ly)) {
-      await win.setPosition(new LogicalPosition(Math.round(winX), Math.round(winY)));
-    }
-
+    await win.setPosition(new LogicalPosition(Math.round(winX), Math.round(winY)));
+    curWinW = newW;
     curCH = ch;
     curMode = !expand ? "collapsed" : ctrlTop ? "up" : "down";
     expanded = expand;
+    requestAnimationFrame(() =>
+      requestAnimationFrame(() => document.body.classList.remove("settling")),
+    );
   } catch (err) {
+    document.body.classList.remove("settling");
     console.error("applyWindow failed", err);
   }
 }
