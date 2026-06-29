@@ -7,7 +7,12 @@ let appearance: Record<string, any> = {};
 let subtitle = "";
 let recording = false;
 
-// ---- audio playback (TTS): PCM16/16k chunks scheduled back-to-back via Web Audio ----
+// expression / animation state
+let currentExpr = "neutral"; // resting face from latest mood
+let speaking = false;
+let talkTimer: number | undefined;
+
+// ---- audio playback (TTS): PCM16/16k chunks scheduled back-to-back ----
 let audioCtx: AudioContext | null = null;
 let nextAudioTime = 0;
 function ensureCtx(): AudioContext {
@@ -18,7 +23,7 @@ function ensureCtx(): AudioContext {
 function playPcmChunk(b64: string) {
   const ctx = ensureCtx();
   const bin = atob(b64);
-  const n = bin.length >> 1; // PCM16 LE mono
+  const n = bin.length >> 1;
   if (n === 0) return;
   const buf = ctx.createBuffer(1, n, 16000);
   const ch = buf.getChannelData(0);
@@ -55,7 +60,6 @@ function label(s: string): string {
   return s;
 }
 
-// Appearance values may be a full filename or a bare variant; composite wants the variant.
 function variant(val: any, slot: string): string {
   if (typeof val !== "string" || !val) return "";
   let v = val.replace(/\.(png|webp|jpe?g)$/i, "");
@@ -64,13 +68,56 @@ function variant(val: any, slot: string): string {
   return v;
 }
 
+// ---- face layer (expression / blink / talk) ----
+function setFace(expr: string) {
+  (el("#face") as HTMLImageElement).src =
+    `${httpBase}/assets/${gender}/60_face_${expr}.png?h=480`;
+}
+function moodToFace(m: string): string {
+  switch (m) {
+    case "happy": return "happy_1";
+    case "love": return "happy_2";
+    case "sad": return "sad_1";
+    case "angry": return "angry";
+    case "surprised": return "surprise";
+    case "confused": return "awkward";
+    default: return "neutral";
+  }
+}
+function startTalk() {
+  if (talkTimer) return;
+  let on = false;
+  talkTimer = window.setInterval(() => {
+    on = !on;
+    setFace(on ? "base_talk" : currentExpr);
+  }, 160);
+}
+function stopTalk() {
+  if (talkTimer) {
+    clearInterval(talkTimer);
+    talkTimer = undefined;
+  }
+  setFace(currentExpr);
+}
+function scheduleBlink() {
+  const delay = 2500 + Math.random() * 3500;
+  window.setTimeout(() => {
+    if (!speaking && currentExpr === "neutral") {
+      setFace("base_blink");
+      window.setTimeout(() => {
+        if (!speaking) setFace(currentExpr);
+      }, 130);
+    }
+    scheduleBlink();
+  }, delay);
+}
+
 function loadPortrait() {
   const img = el("#portrait") as HTMLImageElement;
   const a = appearance || {};
   const p = new URLSearchParams();
   p.set("h", "480");
   const hairBack = variant(a.hair_back, "hair_back") || "short_black";
-  // front hair matches back hair; fall back so the fringe is never missing
   const hairFront = variant(a.hair_front, "hair_front") || hairBack;
   const costume = variant(a.costume, "costume") || "jacket";
   p.set("hair_back", hairBack);
@@ -80,8 +127,10 @@ function loadPortrait() {
     p.set("blush", typeof a.blush === "string" ? variant(a.blush, "blush") || "faint" : "faint");
   }
   if (a.glasses === true) p.set("glasses", "1");
+  p.set("face", "none"); // body only; face is a separate animated layer
   p.set("t", String(Date.now()));
   img.src = `${httpBase}/assets/composite_png/${gender}?${p.toString()}`;
+  setFace(currentExpr);
 }
 
 async function init() {
@@ -96,12 +145,26 @@ async function init() {
     if (p?.appearance) appearance = p.appearance;
     loadPortrait();
   });
-  // TTS audio: reset schedule at reply start, then play each PCM chunk
+  // mood from the agent → switch resting expression
+  await listen<any>("response", (e) => {
+    const m = e.payload?.emotion;
+    if (typeof m === "string" && m) {
+      currentExpr = moodToFace(m);
+      if (!speaking) setFace(currentExpr);
+    }
+  });
+  // TTS audio: reply starts → talk animation; play chunks
   await listen("audio-start", () => {
     const ctx = ensureCtx();
     nextAudioTime = ctx.currentTime;
+    speaking = true;
+    startTalk();
   });
   await listen<string>("audio", (e) => playPcmChunk(e.payload as string));
+  await listen("speak_done", () => {
+    speaking = false;
+    stopTalk();
+  });
 
   try {
     const cfg = await invoke<{ httpBase: string; status: string }>("get_config");
@@ -111,6 +174,7 @@ async function init() {
     /* keep defaults */
   }
   loadPortrait();
+  scheduleBlink();
 
   const form = el("#chat-form") as HTMLFormElement;
   form.addEventListener("submit", async (ev) => {
@@ -118,7 +182,7 @@ async function init() {
     const input = el("#chat-input") as HTMLInputElement;
     const text = input.value.trim();
     if (!text) return;
-    ensureCtx(); // unlock audio on user gesture (autoplay policy)
+    ensureCtx();
     subtitle = "";
     setBubble("…");
     input.value = "";
@@ -129,10 +193,9 @@ async function init() {
     }
   });
 
-  // mic button: click to start recording, click again to stop & send
   const mic = el("#mic-btn");
   mic.addEventListener("click", async () => {
-    ensureCtx(); // unlock audio output on user gesture
+    ensureCtx();
     if (!recording) {
       recording = true;
       mic.classList.add("recording");

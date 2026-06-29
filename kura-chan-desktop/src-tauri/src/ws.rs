@@ -144,6 +144,7 @@ fn handle_server_text(app: &AppHandle, text: &str) {
         "subtitle" => { let _ = app.emit("subtitle", &v); }
         "stt" => { let _ = app.emit("stt", &v); }
         "sync" => { let _ = app.emit("sync", &v); }
+        "response" => { let _ = app.emit("response", &v); }
         "state" => { let _ = app.emit("state", &v); }
         "control" => { let _ = app.emit("control", &v); }
         "speak_done" => { let _ = app.emit("speak_done", ()); }
