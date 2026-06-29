@@ -78,10 +78,10 @@ body {
 
 .bubble {
   position: absolute;
-  top: 6px;
+  bottom: calc(var(--ctrl-h, 0px) + 10px);
   left: 50%;
   transform: translateX(-50%);
-  max-width: 88%;
+  max-width: 92%;
   background: rgba(20, 20, 24, 0.8);
   border-radius: 12px;
   padding: 6px 12px;
@@ -118,7 +118,19 @@ body {
   display: flex;
   gap: 4px;
   justify-content: center;
-  flex-wrap: wrap;
+  align-items: center;
+  flex-wrap: nowrap;
+}
+.dot {
+  width: 9px;
+  height: 9px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: #e05555;
+  box-shadow: 0 0 4px rgba(0, 0, 0, 0.45);
+}
+.dot.connected {
+  background: #4caf78;
 }
 #menu button {
   height: 30px;

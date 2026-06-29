@@ -53,6 +53,19 @@ pub fn run() {
             let handle = ws::connect(app.handle().clone(), ws_url, http_base, api_key, device_id);
             app.manage(handle);
             app.manage(Recorder::new());
+
+            // status-bar tray icon with a quit menu
+            let quit = tauri::menu::MenuItem::with_id(app, "quit", "退出小爪", true, None::<&str>)?;
+            let menu = tauri::menu::Menu::with_items(app, &[&quit])?;
+            let _tray = tauri::tray::TrayIconBuilder::new()
+                .icon(app.default_window_icon().unwrap().clone())
+                .menu(&menu)
+                .on_menu_event(|app, event| {
+                    if event.id.as_ref() == "quit" {
+                        app.exit(0);
+                    }
+                })
+                .build(app)?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

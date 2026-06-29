@@ -36,6 +36,7 @@ async function applyWindow(expand: boolean) {
   const win = getCurrentWindow();
   const [pw, ph] = petDims();
   document.documentElement.style.setProperty("--pet-h", ph + "px");
+  document.documentElement.style.setProperty("--ctrl-h", (expand ? ctrlH() : 0) + "px");
   const newW = expand ? Math.max(pw, CTRL_W) : pw;
   const newH = expand ? ph + ctrlH() : ph;
   try {
@@ -88,12 +89,18 @@ function el(sel: string): HTMLElement {
   return document.querySelector(sel)!;
 }
 function setStatus(s: string) {
-  el("#status").textContent = s;
+  const dot = el("#dot");
+  dot.classList.toggle("connected", s === "connected");
+  dot.setAttribute("title", label(s));
 }
+const SUBTITLE_MS = 5000; // auto-hide subtitle after N ms (will be configurable)
+let bubbleTimer: number | undefined;
 function setBubble(s: string) {
   const b = el("#bubble");
   b.textContent = s;
   b.classList.toggle("show", !!s);
+  if (bubbleTimer) clearTimeout(bubbleTimer);
+  if (s) bubbleTimer = window.setTimeout(() => b.classList.remove("show"), SUBTITLE_MS);
 }
 function label(s: string): string {
   if (s === "connected") return "已连接";
@@ -292,7 +299,6 @@ async function init() {
   el("#settings-btn").addEventListener("click", () => {
     setBubble("设置面板开发中…（下个版本）");
   });
-  el("#close-btn").addEventListener("click", () => void getCurrentWindow().close());
 
   await applyWindow(false);
 }
