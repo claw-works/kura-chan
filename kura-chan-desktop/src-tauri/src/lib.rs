@@ -15,10 +15,12 @@ fn send_text(state: State<WsHandle>, text: String) -> Result<(), String> {
     state.tx.send(msg.to_string()).map_err(|e| e.to_string())
 }
 
-/// Frontend config (server HTTP base for fetching portrait PNGs, etc.).
+/// Frontend config: server HTTP base (for portrait PNGs) + current WS status
+/// (so the UI can show the right state even if it subscribed after `connected`).
 #[tauri::command]
 fn get_config(state: State<WsHandle>) -> serde_json::Value {
-    json!({ "httpBase": state.http_base })
+    let status = state.status.lock().map(|s| s.clone()).unwrap_or_default();
+    json!({ "httpBase": state.http_base, "status": status })
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

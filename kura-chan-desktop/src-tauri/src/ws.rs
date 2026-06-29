@@ -3,7 +3,7 @@
 //! frontend as Tauri events. Audio frames are received but not yet played (TODO:
 //! voice stage). The same WS protocol as the firmware is reused.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
@@ -13,11 +13,20 @@ use tokio::sync::{mpsc, Mutex};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 
-/// Managed Tauri state: outgoing-message sender + the server's HTTP base (for
-/// the frontend to fetch portrait PNGs).
+/// Managed Tauri state: outgoing-message sender, the server's HTTP base (for the
+/// frontend to fetch portrait PNGs), and the current connection status (so the
+/// frontend can query it on startup — events emitted before it subscribes are lost).
 pub struct WsHandle {
     pub tx: mpsc::UnboundedSender<String>,
     pub http_base: String,
+    pub status: Arc<StdMutex<String>>,
+}
+
+fn set_status(app: &AppHandle, status: &Arc<StdMutex<String>>, value: &str) {
+    if let Ok(mut s) = status.lock() {
+        *s = value.to_string();
+    }
+    let _ = app.emit("ws-status", value);
 }
 
 /// Spawn the connect/reconnect loop and return the handle to send messages.
@@ -30,22 +39,21 @@ pub fn connect(
 ) -> WsHandle {
     let (tx, rx) = mpsc::unbounded_channel::<String>();
     let rx = Arc::new(Mutex::new(rx));
+    let status = Arc::new(StdMutex::new("connecting".to_string()));
+    let status2 = status.clone();
     tauri::async_runtime::spawn(async move {
         loop {
+            set_status(&app, &status2, "connecting");
             let mut guard = rx.lock().await;
-            match run_conn(&app, &ws_url, &api_key, &device_id, &mut guard).await {
-                Ok(()) => {
-                    let _ = app.emit("ws-status", "closed");
-                }
-                Err(e) => {
-                    let _ = app.emit("ws-status", format!("disconnected: {e}"));
-                }
+            match run_conn(&app, &ws_url, &api_key, &device_id, &mut guard, &status2).await {
+                Ok(()) => set_status(&app, &status2, "closed"),
+                Err(e) => set_status(&app, &status2, &format!("disconnected: {e}")),
             }
             drop(guard);
             tokio::time::sleep(Duration::from_secs(3)).await;
         }
     });
-    WsHandle { tx, http_base }
+    WsHandle { tx, http_base, status }
 }
 
 async fn run_conn(
@@ -54,6 +62,7 @@ async fn run_conn(
     api_key: &str,
     device_id: &str,
     rx: &mut mpsc::UnboundedReceiver<String>,
+    status: &Arc<StdMutex<String>>,
 ) -> Result<(), String> {
     let mut req = ws_url.into_client_request().map_err(|e| e.to_string())?;
     {
@@ -71,7 +80,7 @@ async fn run_conn(
         .await
         .map_err(|e| e.to_string())?;
     let (mut write, mut read) = ws.split();
-    let _ = app.emit("ws-status", "connected");
+    set_status(app, status, "connected");
 
     // Announce ourselves (same Hello shape the firmware sends).
     let hello = json!({

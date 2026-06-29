@@ -20,17 +20,17 @@ function loadPortrait() {
   img.src = `${httpBase}/assets/composite_png/${gender}?h=480&t=${Date.now()}`;
 }
 
-async function init() {
-  try {
-    const cfg = await invoke<{ httpBase: string }>("get_config");
-    if (cfg?.httpBase) httpBase = cfg.httpBase;
-  } catch {
-    /* keep default */
-  }
-  loadPortrait();
+function label(s: string): string {
+  if (s === "connected") return "已连接";
+  if (s === "connecting") return "连接中…";
+  if (s === "closed") return "连接已关闭，重连中…";
+  if (s.startsWith("disconnected")) return "已断开，重连中…";
+  return s;
+}
 
-  // server → frontend events (forwarded from the WS client in Rust)
-  await listen<string>("ws-status", (e) => setStatus(String(e.payload)));
+async function init() {
+  // subscribe FIRST so we don't miss a "connected" emitted during connect
+  await listen<string>("ws-status", (e) => setStatus(label(String(e.payload))));
   await listen<any>("subtitle", (e) => {
     // reply text streams in per sentence; empty `final` marker just ends the turn
     subtitle += e.payload?.text ?? "";
@@ -43,6 +43,16 @@ async function init() {
       loadPortrait();
     }
   });
+
+  // then read current config + status (covers events emitted before we subscribed)
+  try {
+    const cfg = await invoke<{ httpBase: string; status: string }>("get_config");
+    if (cfg?.httpBase) httpBase = cfg.httpBase;
+    if (cfg?.status) setStatus(label(cfg.status));
+  } catch {
+    /* keep defaults */
+  }
+  loadPortrait();
 
   const form = el("#chat-form") as HTMLFormElement;
   form.addEventListener("submit", async (ev) => {
