@@ -201,6 +201,14 @@ async fn handle_socket(socket: WebSocket, device_id: String, mut actor: Actor, s
                     )
                     .await;
 
+                    // Hold this device's lock for the whole reply turn, so a
+                    // scheduled job (run_jobs) can't push audio into the device
+                    // mid-conversation — otherwise the two audio streams would
+                    // interleave on the single speaker. Released at block end
+                    // (including every `continue` below).
+                    let dev_lock = state.device_lock(&device_id).await;
+                    let _turn_guard = dev_lock.lock().await;
+
                     // Couldn't transcribe (silence/noise): play a cached canned phrase.
                     if stt_text.trim().is_empty() {
                         tracing::info!("Empty STT, playing canned phrase");

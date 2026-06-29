@@ -571,26 +571,50 @@ impl JobRow {
 
 const JOB_COLS: &str = "id, device_id, action, schedule, enabled, next_fire, created_at";
 
-/// Insert a job for an actor. Returns the short job id assigned.
+/// Max scheduled jobs per actor — caps runaway `[task:]` creation by the agent.
+pub const MAX_JOBS_PER_ACTOR: i64 = 50;
+
+/// Insert a job for an actor. Returns the short job id assigned. Enforces a
+/// per-actor cap and retries on the (rare) 6-hex id collision.
 pub async fn add_job(db: &Db, actor_id: &str, t: &ScheduledTask) -> Result<String, sqlx::Error> {
-    let id = format!("{:06x}", rand::random::<u32>() & 0x00ff_ffff);
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM jobs WHERE actor_id=$1")
+        .bind(actor_id)
+        .fetch_one(db)
+        .await
+        .unwrap_or(0);
+    if count >= MAX_JOBS_PER_ACTOR {
+        return Err(sqlx::Error::Protocol(format!(
+            "job limit reached ({MAX_JOBS_PER_ACTOR}) for actor {actor_id}"
+        )));
+    }
     let action = serde_json::to_value(&t.action).unwrap_or_default();
     let schedule = serde_json::to_value(&t.schedule).unwrap_or_default();
-    sqlx::query(
-        "INSERT INTO jobs(id, actor_id, device_id, label, action, schedule, enabled, next_fire, created_at) \
-         VALUES($1,$2,$3,'',$4,$5,$6,$7,$8)",
-    )
-    .bind(&id)
-    .bind(actor_id)
-    .bind(&t.device_id)
-    .bind(action)
-    .bind(schedule)
-    .bind(t.enabled)
-    .bind(t.next_fire)
-    .bind(t.created_at)
-    .execute(db)
-    .await?;
-    Ok(id)
+    for _ in 0..6 {
+        let id = format!("{:06x}", rand::random::<u32>() & 0x00ff_ffff);
+        let res = sqlx::query(
+            "INSERT INTO jobs(id, actor_id, device_id, label, action, schedule, enabled, next_fire, created_at) \
+             VALUES($1,$2,$3,'',$4,$5,$6,$7,$8)",
+        )
+        .bind(&id)
+        .bind(actor_id)
+        .bind(&t.device_id)
+        .bind(action.clone())
+        .bind(schedule.clone())
+        .bind(t.enabled)
+        .bind(t.next_fire)
+        .bind(t.created_at)
+        .execute(db)
+        .await;
+        match res {
+            Ok(_) => return Ok(id),
+            // id PK collision: pick a new id and retry
+            Err(e) if e.as_database_error().map(|d| d.is_unique_violation()).unwrap_or(false) => {
+                continue;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Err(sqlx::Error::Protocol("job id collision after retries".into()))
 }
 
 pub async fn list_jobs(db: &Db, actor_id: &str) -> Vec<ScheduledTask> {
@@ -629,13 +653,22 @@ pub async fn delete_job(db: &Db, id: &str) -> bool {
 }
 
 /// Fetch all enabled jobs due at `now`; reschedule (or delete one-shots) and
-/// return the fired snapshots for the executor.
+/// return the fired snapshots for the executor. Runs in a transaction with
+/// `FOR UPDATE SKIP LOCKED` so the same job is never claimed twice — safe under
+/// overlapping polls and multiple server instances.
 pub async fn take_due_jobs(db: &Db, now: i64) -> Vec<ScheduledTask> {
+    let mut txn = match db.begin().await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::error!(error = %e, "take_due_jobs: begin tx failed");
+            return Vec::new();
+        }
+    };
     let rows = sqlx::query_as::<_, JobRow>(&format!(
-        "SELECT {JOB_COLS} FROM jobs WHERE enabled AND next_fire <= $1"
+        "SELECT {JOB_COLS} FROM jobs WHERE enabled AND next_fire <= $1 FOR UPDATE SKIP LOCKED"
     ))
     .bind(now)
-    .fetch_all(db)
+    .fetch_all(&mut *txn)
     .await
     .unwrap_or_default();
     let mut due = Vec::new();
@@ -647,11 +680,18 @@ pub async fn take_due_jobs(db: &Db, now: i64) -> Vec<ScheduledTask> {
             let _ = sqlx::query("UPDATE jobs SET next_fire=$2 WHERE id=$1")
                 .bind(&t.id)
                 .bind(t.next_fire)
-                .execute(db)
+                .execute(&mut *txn)
                 .await;
         } else {
-            let _ = sqlx::query("DELETE FROM jobs WHERE id=$1").bind(&t.id).execute(db).await;
+            let _ = sqlx::query("DELETE FROM jobs WHERE id=$1")
+                .bind(&t.id)
+                .execute(&mut *txn)
+                .await;
         }
+    }
+    if let Err(e) = txn.commit().await {
+        tracing::error!(error = %e, "take_due_jobs: commit failed; jobs not advanced");
+        return Vec::new();
     }
     due
 }
