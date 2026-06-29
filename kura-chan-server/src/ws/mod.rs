@@ -139,32 +139,45 @@ async fn handle_socket(socket: WebSocket, device_id: String, mut actor: Actor, s
 
         match msg {
             Message::Text(text) => {
-                let events = match serde_json::from_str::<ClientMessage>(&text) {
-                    Ok(ClientMessage::Hello(hello)) => session.handle_hello(hello),
-                    Ok(ClientMessage::ToolResult(result)) => session.handle_tool_result(result),
+                match serde_json::from_str::<ClientMessage>(&text) {
+                    // Text input (desktop, no mic): same turn pipeline, skip STT.
+                    Ok(ClientMessage::TextInput(ti)) => {
+                        let t = ti.text.trim().to_string();
+                        if !t.is_empty() {
+                            run_turn(&state, &tx, &mut session, &mut actor, &device_id, &growth, session_ttl, &t).await;
+                        }
+                    }
+                    Ok(ClientMessage::Hello(hello)) => {
+                        for ev in session.handle_hello(hello) {
+                            send_event(&tx, ev).await;
+                        }
+                    }
+                    Ok(ClientMessage::ToolResult(result)) => {
+                        for ev in session.handle_tool_result(result) {
+                            send_event(&tx, ev).await;
+                        }
+                    }
                     Ok(ClientMessage::Status(status)) => {
                         if let Some(ap) = &status.appearance {
                             let mut ap2 = ap.clone();
                             if let Some(o) = ap2.as_object_mut() { o.remove("bg"); }  // bg is server-owned
                             db::set_appearance(&state.db, &actor.actor_id, &ap2).await;
                         }
-                        session.handle_status(status)
+                        for ev in session.handle_status(status) {
+                            send_event(&tx, ev).await;
+                        }
                     }
                     Ok(ClientMessage::Event(ev)) => {
                         // head_pat is the chat wake trigger only — no growth (too easy to farm)
                         let _ = ev;
-                        vec![]
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "Invalid JSON message");
-                        vec![SessionEvent::SendJson(ServerMessage::Error(ErrorMessage {
+                        send_event(&tx, SessionEvent::SendJson(ServerMessage::Error(ErrorMessage {
                             code: "parse_error".into(),
                             message: e.to_string(),
-                        }))]
+                        }))).await;
                     }
-                };
-                for event in events {
-                    send_event(&tx, event).await;
                 }
             }
             Message::Binary(data) => {
@@ -192,218 +205,17 @@ async fn handle_socket(socket: WebSocket, device_id: String, mut actor: Actor, s
                             String::new()
                         }
                     };
-                    send_event(
-                        &tx,
-                        SessionEvent::SendJson(ServerMessage::Stt(SttResult {
-                            text: stt_text.clone(),
-                            r#final: true,
-                        })),
-                    )
-                    .await;
-
-                    // Hold this device's lock for the whole reply turn, so a
-                    // scheduled job (run_jobs) can't push audio into the device
-                    // mid-conversation — otherwise the two audio streams would
-                    // interleave on the single speaker. Released at block end
-                    // (including every `continue` below).
-                    let dev_lock = state.device_lock(&device_id).await;
-                    let _turn_guard = dev_lock.lock().await;
-
-                    // Couldn't transcribe (silence/noise): play a cached canned phrase.
+                    // Empty STT (silence/noise) → canned phrase; still device-locked
+                    // so it can't clash with a scheduled job's audio.
                     if stt_text.trim().is_empty() {
                         tracing::info!("Empty STT, playing canned phrase");
+                        let dev_lock = state.device_lock(&device_id).await;
+                        let _g = dev_lock.lock().await;
                         let audio = state.canned_audio(PHRASE_NOT_HEARD, crate::speech::voice_id(&actor.voice)).await;
                         speak_phrase(&tx, &mut session, PHRASE_NOT_HEARD, "confused", &audio).await;
                         continue;
                     }
-
-                    // Resolve the actor's conversation session (rolls over after idle TTL).
-                    let conv_session = db::get_or_create_session(&state.db, &actor.actor_id, session_ttl)
-                        .await
-                        .unwrap_or_else(|_| session.session_id.clone());
-                    // Conversation history (oldest→newest) before logging this
-                    // turn; fed to stateless providers (openai/anthropic).
-                    let history = db::get_recent_messages(
-                        &state.db,
-                        &conv_session,
-                        &actor.actor_id,
-                        (state.config.llm.history_turns as i64) * 2,
-                    )
-                    .await;
-                    db::log_message(&state.db, &conv_session, &actor.actor_id, "user", &stt_text).await;
-
-                    // Stream the reply: synthesize + send sentence by sentence.
-                    let user_message = session.build_user_message(&stt_text);
-                    // Rebuild the system prompt each turn from the latest actor + PG
-                    // content, so admin edits (prompts/growth) and bond/level changes
-                    // take effect immediately — no device reconnect needed.
-                    if let Some(a) = db::actor_by_id(&state.db, &actor.actor_id).await {
-                        actor = a;
-                    }
-                    let system_prompt = build_system_prompt(&state, &actor).await;
-                    // history + current user message (current carries device-status injection)
-                    let mut messages: Vec<ChatMessage> = history
-                        .into_iter()
-                        .map(|m| ChatMessage {
-                            role: if m.role == "assistant" { Role::Assistant } else { Role::User },
-                            content: m.content,
-                        })
-                        .collect();
-                    messages.push(ChatMessage::user(user_message));
-                    let req = LlmRequest {
-                        system_prompt,
-                        messages,
-                        session_id: conv_session.clone(),
-                        actor_id: actor.actor_id.clone(),
-                    };
-                    let mut stream = match state.llm.stream(req).await {
-                        Ok(s) => s,
-                        Err(e) => {
-                            tracing::error!(error = ?e, "LLM invoke failed");
-                            let audio = state.canned_audio(PHRASE_ERROR, crate::speech::voice_id(&actor.voice)).await;
-                            speak_phrase(&tx, &mut session, PHRASE_ERROR, "sad", &audio).await;
-                            continue;
-                        }
-                    };
-
-                    for ev in session.transition_to_speaking(AgentResponse {
-                        text: String::new(),
-                        emotion: "happy".into(),
-                        audio_follows: true,
-                    }) {
-                        send_event(&tx, ev).await;
-                    }
-
-                    let mut buf = String::new();
-                    let mut new_tasks: Vec<crate::tasks::ScheduledTask> = Vec::new();
-                    let mut cancel_jobs: Vec<String> = Vec::new();
-                    let mut appearance_ops: Vec<(String, serde_json::Value)> = Vec::new();
-                    let mut turn_growth = TurnGrowth::default();
-                    let mut reply_text = String::new();
-                    let mut raw_reply = String::new();   // raw LLM output incl. tags, for debugging
-                    let mut want_new_session = false;
-                    let mut first = true;
-                    let mut sent_any = false;
-                    loop {
-                        match stream.next().await {
-                            Some(Ok(t)) => {
-                                raw_reply.push_str(&t);
-                                buf.push_str(&t);
-                                for msg in extract_tags(&mut buf, &device_id, &mut new_tasks, &mut want_new_session, &mut appearance_ops, &mut turn_growth, &mut cancel_jobs) {
-                                    send_event(&tx, SessionEvent::SendJson(msg)).await;
-                                }
-                                // Only split sentences in the text BEFORE any pending (unclosed)
-                                // tag — extract_tags leaves an in-progress "[task:... " at the end,
-                                // and its say= text may contain 。！？ which would otherwise be
-                                // cut mid-tag and leak the marker into TTS.
-                                while let Some(cut) = {
-                                    let safe = buf.find('[').unwrap_or(buf.len());
-                                    split_sentence(&buf[..safe])
-                                } {
-                                    let seg: String = buf.drain(..cut).collect();
-                                    let seg = seg.trim();
-                                    if !seg.is_empty() && !seg.contains("[NOISE]") {
-                                        reply_text.push_str(seg);
-                                        let audio =
-                                            state.tts.synthesize(seg, crate::speech::voice_id(&actor.voice)).await.unwrap_or_default();
-                                        if !audio.is_empty() {
-                                            send_audio_stream(&tx, &audio, first).await;
-                                            first = false;
-                                            sent_any = true;
-                                        }
-                                    }
-                                }
-                            }
-                            Some(Err(e)) => {
-                                tracing::error!(error = %e, "LLM stream error");
-                                break;
-                            }
-                            None => break,
-                        }
-                    }
-                    // flush trailing text
-                    for msg in extract_tags(&mut buf, &device_id, &mut new_tasks, &mut want_new_session, &mut appearance_ops, &mut turn_growth, &mut cancel_jobs) {
-                        send_event(&tx, SessionEvent::SendJson(msg)).await;
-                    }
-                    let rest = buf.trim().to_string();
-                    if !rest.is_empty() && !rest.contains("[NOISE]") {
-                        reply_text.push_str(&rest);
-                        let audio = state.tts.synthesize(&rest, crate::speech::voice_id(&actor.voice)).await.unwrap_or_default();
-                        if !audio.is_empty() {
-                            send_audio_stream(&tx, &audio, first).await;
-                            first = false;
-                            sent_any = true;
-                        }
-                    }
-                    // raw LLM output (incl. [do:/mood:/bond:] tags) + the text actually spoken
-                    tracing::info!(raw = %raw_reply, "🧠 LLM raw output");
-                    tracing::info!(spoken = %reply_text, "🔊 TTS text");
-                    // nothing intelligible → canned "not heard"
-                    if !sent_any {
-                        tracing::info!("No speakable reply, using canned phrase");
-                        let audio = state.canned_audio(PHRASE_NOT_HEARD, crate::speech::voice_id(&actor.voice)).await;
-                        send_audio_stream(&tx, &audio, first).await;
-                    }
-                    // Persist any jobs the agent created this turn, and cancel any it removed.
-                    for t in new_tasks {
-                        match db::add_job(&state.db, &actor.actor_id, &t).await {
-                            Ok(id) => tracing::info!(job = %id, device = %device_id, "job created via voice"),
-                            Err(e) => tracing::error!(error = %e, "job create failed"),
-                        }
-                    }
-                    for id in cancel_jobs {
-                        if db::delete_job(&state.db, &id).await {
-                            tracing::info!(job = %id, "job cancelled via voice");
-                        }
-                    }
-                    // Store the RAW reply (WITH [mood:/do:/bond:] tags) as history. A tagless
-                    // history makes the model mimic it and stop emitting tags; keeping the tags
-                    // in history keeps it emitting them. Tags in history are never re-executed.
-                    let assistant_msg = raw_reply.trim().to_string();
-                    if !assistant_msg.is_empty() {
-                        db::log_message(&state.db, &conv_session, &actor.actor_id, "assistant", &assistant_msg).await;
-                    }
-                    db::touch_session(&state.db, &conv_session).await;
-                    // persist any server-owned appearance changes (bg/blush/glasses) the agent made
-                    for (k, v) in &appearance_ops {
-                        db::set_appearance_key(&state.db, &actor.actor_id, k, v.clone()).await;
-                    }
-                    // server-authoritative growth for a completed turn:
-                    //   xp  = base + sum(event rewards the agent flagged)
-                    //   bond = agent-judged delta from this interaction (clamped)
-                    //   energy = -turn cost (passive regen handled in bump_growth)
-                    let event_xp: i32 =
-                        turn_growth.events.iter().map(|lvl| growth.event_xp(lvl)).sum();
-                    let dxp = growth.base_xp + event_xp;
-                    // positive capped (anti-farming); negative allowed to go
-                    // deeper so serious boundary violations break the normal cap.
-                    let dbond = turn_growth
-                        .bond
-                        .clamp(-(growth.bond_max_delta * 3), growth.bond_max_delta);
-                    if let Some(a) = db::bump_growth(
-                        &state.db,
-                        &actor.actor_id,
-                        dxp,
-                        dbond,
-                        -growth.turn_energy,
-                        growth.xp_base,
-                        growth.energy_regen_per_hour,
-                    )
-                    .await
-                    {
-                        actor = a;
-                        send_event(&tx, sync_msg(&actor, false, growth.xp_base)).await;
-                    }
-                    if want_new_session {
-                        if let Ok(sid) = db::new_session(&state.db, &actor.actor_id).await {
-                            tracing::info!(actor = %actor.actor_id, session = %sid, "new session (agent requested)");
-                        }
-                    }
-                    send_event(&tx, SessionEvent::SendJson(ServerMessage::SpeakDone))
-                        .await;
-                    for ev in session.finish_speaking() {
-                        send_event(&tx, ev).await;
-                    }
+                    run_turn(&state, &tx, &mut session, &mut actor, &device_id, &growth, session_ttl, &stt_text).await;
                 }
             }
             Message::Ping(_) => {}
@@ -416,6 +228,208 @@ async fn handle_socket(socket: WebSocket, device_id: String, mut actor: Actor, s
     drop(tx);
     let _ = writer.await;
     tracing::info!(device_id = %device_id, "Device disconnected");
+}
+
+/// Run one conversation turn: device-locked LLM stream → sentence-by-sentence
+/// TTS (audio + subtitle) → tag handling → growth settle → SpeakDone. Shared by
+/// voice (post-STT) and text input. `user_text` is the user's utterance/message
+/// (already non-empty).
+async fn run_turn(
+    state: &Arc<AppState>,
+    tx: &crate::registry::DeviceTx,
+    session: &mut Session,
+    actor: &mut Actor,
+    device_id: &str,
+    growth: &crate::config::GrowthConfig,
+    session_ttl: i64,
+    user_text: &str,
+) {
+    // Hold this device's lock for the whole reply turn so a scheduled job
+    // (run_jobs) can't push audio into the device mid-conversation.
+    let dev_lock = state.device_lock(device_id).await;
+    let _turn_guard = dev_lock.lock().await;
+
+    // Echo the user input back (transcript / typed text) for clients that show it.
+    send_event(
+        tx,
+        SessionEvent::SendJson(ServerMessage::Stt(SttResult {
+            text: user_text.to_string(),
+            r#final: true,
+        })),
+    )
+    .await;
+
+    let conv_session = db::get_or_create_session(&state.db, &actor.actor_id, session_ttl)
+        .await
+        .unwrap_or_else(|_| session.session_id.clone());
+    let history = db::get_recent_messages(
+        &state.db,
+        &conv_session,
+        &actor.actor_id,
+        (state.config.llm.history_turns as i64) * 2,
+    )
+    .await;
+    db::log_message(&state.db, &conv_session, &actor.actor_id, "user", user_text).await;
+
+    let user_message = session.build_user_message(user_text);
+    // Rebuild system prompt each turn from the latest actor + PG content so admin
+    // edits and bond/level changes apply immediately.
+    if let Some(a) = db::actor_by_id(&state.db, &actor.actor_id).await {
+        *actor = a;
+    }
+    let system_prompt = build_system_prompt(state, actor).await;
+    let mut messages: Vec<ChatMessage> = history
+        .into_iter()
+        .map(|m| ChatMessage {
+            role: if m.role == "assistant" { Role::Assistant } else { Role::User },
+            content: m.content,
+        })
+        .collect();
+    messages.push(ChatMessage::user(user_message));
+    let req = LlmRequest {
+        system_prompt,
+        messages,
+        session_id: conv_session.clone(),
+        actor_id: actor.actor_id.clone(),
+    };
+    let mut stream = match state.llm.stream(req).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(error = ?e, "LLM invoke failed");
+            let audio = state.canned_audio(PHRASE_ERROR, crate::speech::voice_id(&actor.voice)).await;
+            speak_phrase(tx, session, PHRASE_ERROR, "sad", &audio).await;
+            return;
+        }
+    };
+
+    for ev in session.transition_to_speaking(AgentResponse {
+        text: String::new(),
+        emotion: "happy".into(),
+        audio_follows: true,
+    }) {
+        send_event(tx, ev).await;
+    }
+
+    let mut buf = String::new();
+    let mut new_tasks: Vec<crate::tasks::ScheduledTask> = Vec::new();
+    let mut cancel_jobs: Vec<String> = Vec::new();
+    let mut appearance_ops: Vec<(String, serde_json::Value)> = Vec::new();
+    let mut turn_growth = TurnGrowth::default();
+    let mut reply_text = String::new();
+    let mut raw_reply = String::new();
+    let mut want_new_session = false;
+    let mut first = true;
+    let mut sent_any = false;
+    loop {
+        match stream.next().await {
+            Some(Ok(t)) => {
+                raw_reply.push_str(&t);
+                buf.push_str(&t);
+                for msg in extract_tags(&mut buf, device_id, &mut new_tasks, &mut want_new_session, &mut appearance_ops, &mut turn_growth, &mut cancel_jobs) {
+                    send_event(tx, SessionEvent::SendJson(msg)).await;
+                }
+                while let Some(cut) = {
+                    let safe = buf.find('[').unwrap_or(buf.len());
+                    split_sentence(&buf[..safe])
+                } {
+                    let seg: String = buf.drain(..cut).collect();
+                    let seg = seg.trim();
+                    if !seg.is_empty() && !seg.contains("[NOISE]") {
+                        reply_text.push_str(seg);
+                        send_event(tx, SessionEvent::SendJson(ServerMessage::Subtitle(Subtitle {
+                            text: seg.to_string(),
+                            r#final: false,
+                        }))).await;
+                        let audio = state.tts.synthesize(seg, crate::speech::voice_id(&actor.voice)).await.unwrap_or_default();
+                        if !audio.is_empty() {
+                            send_audio_stream(tx, &audio, first).await;
+                            first = false;
+                            sent_any = true;
+                        }
+                    }
+                }
+            }
+            Some(Err(e)) => {
+                tracing::error!(error = %e, "LLM stream error");
+                break;
+            }
+            None => break,
+        }
+    }
+    for msg in extract_tags(&mut buf, device_id, &mut new_tasks, &mut want_new_session, &mut appearance_ops, &mut turn_growth, &mut cancel_jobs) {
+        send_event(tx, SessionEvent::SendJson(msg)).await;
+    }
+    let rest = buf.trim().to_string();
+    if !rest.is_empty() && !rest.contains("[NOISE]") {
+        reply_text.push_str(&rest);
+        send_event(tx, SessionEvent::SendJson(ServerMessage::Subtitle(Subtitle {
+            text: rest.clone(),
+            r#final: false,
+        }))).await;
+        let audio = state.tts.synthesize(&rest, crate::speech::voice_id(&actor.voice)).await.unwrap_or_default();
+        if !audio.is_empty() {
+            send_audio_stream(tx, &audio, first).await;
+            first = false;
+            sent_any = true;
+        }
+    }
+    // subtitle end-of-turn marker (clients finalize the bubble)
+    send_event(tx, SessionEvent::SendJson(ServerMessage::Subtitle(Subtitle {
+        text: String::new(),
+        r#final: true,
+    }))).await;
+    tracing::info!(raw = %raw_reply, "🧠 LLM raw output");
+    tracing::info!(spoken = %reply_text, "🔊 TTS text");
+    if !sent_any {
+        tracing::info!("No speakable reply, using canned phrase");
+        let audio = state.canned_audio(PHRASE_NOT_HEARD, crate::speech::voice_id(&actor.voice)).await;
+        send_audio_stream(tx, &audio, first).await;
+    }
+    for t in new_tasks {
+        match db::add_job(&state.db, &actor.actor_id, &t).await {
+            Ok(id) => tracing::info!(job = %id, device = %device_id, "job created via voice"),
+            Err(e) => tracing::error!(error = %e, "job create failed"),
+        }
+    }
+    for id in cancel_jobs {
+        if db::delete_job(&state.db, &id).await {
+            tracing::info!(job = %id, "job cancelled via voice");
+        }
+    }
+    let assistant_msg = raw_reply.trim().to_string();
+    if !assistant_msg.is_empty() {
+        db::log_message(&state.db, &conv_session, &actor.actor_id, "assistant", &assistant_msg).await;
+    }
+    db::touch_session(&state.db, &conv_session).await;
+    for (k, v) in &appearance_ops {
+        db::set_appearance_key(&state.db, &actor.actor_id, k, v.clone()).await;
+    }
+    let event_xp: i32 = turn_growth.events.iter().map(|lvl| growth.event_xp(lvl)).sum();
+    let dxp = growth.base_xp + event_xp;
+    let dbond = turn_growth.bond.clamp(-(growth.bond_max_delta * 3), growth.bond_max_delta);
+    if let Some(a) = db::bump_growth(
+        &state.db,
+        &actor.actor_id,
+        dxp,
+        dbond,
+        -growth.turn_energy,
+        growth.xp_base,
+        growth.energy_regen_per_hour,
+    )
+    .await
+    {
+        *actor = a;
+        send_event(tx, sync_msg(actor, false, growth.xp_base)).await;
+    }
+    if want_new_session {
+        if let Ok(sid) = db::new_session(&state.db, &actor.actor_id).await {
+            tracing::info!(actor = %actor.actor_id, session = %sid, "new session (agent requested)");
+        }
+    }
+    send_event(tx, SessionEvent::SendJson(ServerMessage::SpeakDone)).await;
+    for ev in session.finish_speaking() {
+        send_event(tx, ev).await;
+    }
 }
 
 /// Push PCM as AUDIO_OUTPUT frames (chunked). `start` marks the very first frame

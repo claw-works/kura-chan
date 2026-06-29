@@ -9,6 +9,14 @@ pub enum ClientMessage {
     ToolResult(ToolResult),
     Status(DeviceStatus),
     Event(DeviceEvent),
+    /// Text input from a client without a mic (desktop): bypasses STT and runs
+    /// the same turn pipeline as a transcribed utterance.
+    TextInput(TextInput),
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TextInput {
+    pub text: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -66,8 +74,18 @@ pub enum ServerMessage {
     Control(ControlMessage),
     /// Server-authoritative state pushed to the device (growth + appearance).
     Sync(SyncState),
+    /// Reply text for clients that show subtitles (desktop). Streamed per
+    /// sentence; `final=true` marks the end of the turn. Audio-only devices
+    /// (firmware) simply ignore this message type.
+    Subtitle(Subtitle),
     /// Sent after all streamed audio for a reply has been pushed.
     SpeakDone,
+}
+
+#[derive(Debug, Serialize)]
+pub struct Subtitle {
+    pub text: String,
+    pub r#final: bool,
 }
 
 #[derive(Debug, Serialize)]

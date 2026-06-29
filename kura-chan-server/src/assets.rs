@@ -195,6 +195,8 @@ pub struct CompositeQ {
     pub costume: Option<String>,
     pub blush: Option<String>,
     pub glasses: Option<u8>,
+    /// Face expression (PNG composite only; the M5 overlays the face itself).
+    pub face: Option<String>,
     pub h: Option<u32>,
 }
 
@@ -226,9 +228,8 @@ fn encode_rgb565a8(img: &image::RgbaImage) -> Vec<u8> {
 }
 
 /// Composite the given layer stems at native resolution (alpha overlay in
-/// order), scale once to height `h`, encode RGB565+A8. Missing optional layers
-/// are skipped.
-fn composite_and_encode(gender: &str, stems: &[String], h: u32) -> Result<Vec<u8>, String> {
+/// order) and scale once to height `h`. Missing optional layers are skipped.
+fn composite_layers(gender: &str, stems: &[String], h: u32) -> Result<image::RgbaImage, String> {
     use image::imageops;
     let mut base: Option<image::RgbaImage> = None;
     for stem in stems {
@@ -248,7 +249,22 @@ fn composite_and_encode(gender: &str, stems: &[String], h: u32) -> Result<Vec<u8
         let nw = ((w0 as f32) * (h as f32 / h0 as f32)).round().max(1.0) as u32;
         img = imageops::resize(&img, nw, h, imageops::FilterType::Lanczos3);
     }
-    Ok(encode_rgb565a8(&img))
+    Ok(img)
+}
+
+/// Composite + encode RGB565+A8 (for the M5 device).
+fn composite_and_encode(gender: &str, stems: &[String], h: u32) -> Result<Vec<u8>, String> {
+    Ok(encode_rgb565a8(&composite_layers(gender, stems, h)?))
+}
+
+/// Composite + encode PNG (for clients with a normal image decoder, e.g. desktop).
+fn composite_and_encode_png(gender: &str, stems: &[String], h: u32) -> Result<Vec<u8>, String> {
+    let img = composite_layers(gender, stems, h)?;
+    let mut out = Vec::new();
+    image::DynamicImage::ImageRgba8(img)
+        .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+        .map_err(|e| e.to_string())?;
+    Ok(out)
 }
 
 /// GET /assets/composite/{gender}?hair_back=&hair_front=&body=&costume=&blush=&glasses=1&h=240
@@ -319,6 +335,52 @@ pub async fn get_face(
     }
 }
 
+
+/// GET /assets/composite_png/{gender}?body=&hair_back=&hair_front=&costume=&blush=&glasses=1&face=neutral&h=480
+/// Full character portrait (body layers + face on top) as a transparent PNG, for
+/// desktop/web clients with a normal image decoder. The M5 instead uses the
+/// RGB565 composite + a separately-overlaid animated face layer.
+pub async fn get_composite_png(
+    Path(gender): Path<String>,
+    Query(q): Query<CompositeQ>,
+) -> impl IntoResponse {
+    if !safe_seg(&gender) {
+        return (StatusCode::BAD_REQUEST, "bad gender").into_response();
+    }
+    let body = q.body.clone().unwrap_or_else(|| "base".into());
+    let mut stems: Vec<String> = Vec::new();
+    if let Some(v) = q.hair_back.as_deref().filter(|s| !s.is_empty()) {
+        stems.push(format!("10_hair_back_{v}"));
+    }
+    stems.push(format!("20_body_{body}"));
+    if let Some(v) = q.blush.as_deref().filter(|s| !s.is_empty()) {
+        stems.push(format!("30_blush_{v}"));
+    }
+    if let Some(v) = q.costume.as_deref().filter(|s| !s.is_empty()) {
+        stems.push(format!("40_costume_{v}"));
+    }
+    if let Some(v) = q.hair_front.as_deref().filter(|s| !s.is_empty()) {
+        stems.push(format!("50_hair_front_{v}"));
+    }
+    // face on top (default neutral); missing face layer is just skipped
+    let face = q.face.as_deref().filter(|s| !s.is_empty()).unwrap_or("neutral");
+    stems.push(format!("60_face_{face}"));
+    if q.glasses.unwrap_or(0) != 0 {
+        stems.push("70_accessory_glasses".to_string());
+    }
+    for s in &stems {
+        if !safe_seg(s) {
+            return (StatusCode::BAD_REQUEST, "bad layer").into_response();
+        }
+    }
+    let h = q.h.unwrap_or(0).min(2000);
+    let gender2 = gender.clone();
+    match tokio::task::spawn_blocking(move || composite_and_encode_png(&gender2, &stems, h)).await {
+        Ok(Ok(bytes)) => ([(header::CONTENT_TYPE, "image/png")], bytes).into_response(),
+        Ok(Err(e)) => (StatusCode::NOT_FOUND, e).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
 
 // ---- catalog seeding: scan asset folders -> catalog_items (default thresholds) ----
 

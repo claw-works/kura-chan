@@ -28,6 +28,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/session/reset", axum::routing::post(api::reset_session))
         .route("/assets/{gender}", get(crate::assets::list_assets))
         .route("/assets/composite/{gender}", get(crate::assets::get_composite))
+        .route("/assets/composite_png/{gender}", get(crate::assets::get_composite_png))
         .route("/assets/face/{gender}/{expr}", get(crate::assets::get_face))
         .route("/assets/{gender}/{file}", get(crate::assets::get_asset))
         .route("/tasks", get(api::list_tasks).post(api::create_task))
