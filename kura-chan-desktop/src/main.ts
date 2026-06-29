@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
+import { getCurrentWindow, LogicalSize, LogicalPosition } from "@tauri-apps/api/window";
 
 let httpBase = "http://127.0.0.1:18099";
 let gender = "girl";
@@ -8,12 +8,53 @@ let appearance: Record<string, any> = {};
 let subtitle = "";
 let recording = false;
 
-// expression / animation state
-let currentExpr = "neutral"; // resting face from latest mood
+// expression / animation
+let currentExpr = "neutral";
 let speaking = false;
 let talkTimer: number | undefined;
 
-// ---- audio playback (TTS): PCM16/16k chunks scheduled back-to-back ----
+// window / layout state — only the CHARACTER scales; controls are fixed-size and
+// the window expands on hover WITHOUT moving the character (position compensated).
+const PET_SIZES = [96, 180, 300]; // 小 / 中 / 大 (character height)
+const PET_RATIO = 0.83;
+const CTRL_W = 260; // fixed control width when expanded
+const MENU_H = 40; // menu row
+const FORM_H = 48; // text input row (when open)
+let sizeIdx = 1;
+let expanded = false;
+let curW = 0; // tracked current window logical width
+let textOpen = false;
+
+function petDims(): [number, number] {
+  const h = PET_SIZES[sizeIdx];
+  return [Math.max(72, Math.round(h * PET_RATIO)), h];
+}
+function ctrlH(): number {
+  return textOpen ? MENU_H + FORM_H : MENU_H;
+}
+async function applyWindow(expand: boolean) {
+  const win = getCurrentWindow();
+  const [pw, ph] = petDims();
+  document.documentElement.style.setProperty("--pet-h", ph + "px");
+  const newW = expand ? Math.max(pw, CTRL_W) : pw;
+  const newH = expand ? ph + ctrlH() : ph;
+  try {
+    const pos = await win.outerPosition();
+    const sf = await win.scaleFactor();
+    const lx = pos.x / sf;
+    const ly = pos.y / sf;
+    const prevW = curW || newW;
+    const nx = lx + prevW / 2 - newW / 2; // keep character horizontally centered
+    await win.setSize(new LogicalSize(newW, newH));
+    if (curW) await win.setPosition(new LogicalPosition(Math.round(nx), Math.round(ly)));
+    curW = newW;
+    expanded = expand;
+  } catch (err) {
+    console.error("applyWindow failed", err);
+  }
+}
+
+// ---- audio playback (TTS) ----
 let audioCtx: AudioContext | null = null;
 let nextAudioTime = 0;
 function ensureCtx(): AudioContext {
@@ -54,38 +95,6 @@ function setBubble(s: string) {
   b.textContent = s;
   b.classList.toggle("show", !!s);
 }
-
-// Only the CHARACTER scales (via --pet-h); controls stay fixed-size and the
-// window expands on hover to fit them, then collapses back to just the pet.
-const PET_SIZES = [64, 120, 200, 300];
-const PET_RATIO = 0.83; // character width / height
-const CTRL_W = 240; // fixed control area width (expanded)
-const CTRL_H = 92; // fixed control area height (toolbar + chat row)
-let sizeIdx = 2;
-
-function petDims(): [number, number] {
-  const h = PET_SIZES[sizeIdx];
-  return [Math.max(60, Math.round(h * PET_RATIO)), h];
-}
-async function collapse() {
-  const [w, h] = petDims();
-  document.documentElement.style.setProperty("--pet-h", h + "px");
-  try {
-    await getCurrentWindow().setSize(new LogicalSize(w, h));
-  } catch (err) {
-    console.error("setSize failed", err);
-  }
-}
-async function expand() {
-  const [w, h] = petDims();
-  document.documentElement.style.setProperty("--pet-h", h + "px");
-  try {
-    await getCurrentWindow().setSize(new LogicalSize(Math.max(w, CTRL_W), h + CTRL_H));
-  } catch (err) {
-    console.error("setSize failed", err);
-  }
-}
-
 function label(s: string): string {
   if (s === "connected") return "已连接";
   if (s === "connecting") return "连接中…";
@@ -102,10 +111,9 @@ function variant(val: any, slot: string): string {
   return v;
 }
 
-// ---- face layer (expression / blink / talk) ----
+// ---- face layer ----
 function setFace(expr: string) {
-  (el("#face") as HTMLImageElement).src =
-    `${httpBase}/assets/${gender}/60_face_${expr}.png?h=480`;
+  (el("#face") as HTMLImageElement).src = `${httpBase}/assets/${gender}/60_face_${expr}.png?h=480`;
 }
 function moodToFace(m: string): string {
   switch (m) {
@@ -161,10 +169,35 @@ function loadPortrait() {
     p.set("blush", typeof a.blush === "string" ? variant(a.blush, "blush") || "faint" : "faint");
   }
   if (a.glasses === true) p.set("glasses", "1");
-  p.set("face", "none"); // body only; face is a separate animated layer
+  p.set("face", "none");
   p.set("t", String(Date.now()));
   img.src = `${httpBase}/assets/composite_png/${gender}?${p.toString()}`;
   setFace(currentExpr);
+}
+
+async function startVoice() {
+  ensureCtx();
+  recording = true;
+  el("#voice-btn").classList.add("recording");
+  subtitle = "";
+  setBubble("聆听中…");
+  try {
+    await invoke("start_recording");
+  } catch (err) {
+    recording = false;
+    el("#voice-btn").classList.remove("recording");
+    setBubble("录音失败：" + err);
+  }
+}
+async function stopVoice() {
+  recording = false;
+  el("#voice-btn").classList.remove("recording");
+  setBubble("思考中…");
+  try {
+    await invoke("stop_recording");
+  } catch (err) {
+    setBubble("发送失败：" + err);
+  }
 }
 
 async function init() {
@@ -179,7 +212,6 @@ async function init() {
     if (p?.appearance) appearance = p.appearance;
     loadPortrait();
   });
-  // mood from the agent → switch resting expression
   await listen<any>("response", (e) => {
     const m = e.payload?.emotion;
     if (typeof m === "string" && m) {
@@ -187,7 +219,6 @@ async function init() {
       if (!speaking) setFace(currentExpr);
     }
   });
-  // TTS audio: reply starts → talk animation; play chunks
   await listen("audio-start", () => {
     const ctx = ensureCtx();
     nextAudioTime = ctx.currentTime;
@@ -210,6 +241,7 @@ async function init() {
   loadPortrait();
   scheduleBlink();
 
+  // text input form
   const form = el("#chat-form") as HTMLFormElement;
   form.addEventListener("submit", async (ev) => {
     ev.preventDefault();
@@ -227,52 +259,42 @@ async function init() {
     }
   });
 
-  const mic = el("#mic-btn");
-  mic.addEventListener("click", async () => {
-    ensureCtx();
-    if (!recording) {
-      recording = true;
-      mic.classList.add("recording");
-      subtitle = "";
-      setBubble("聆听中…");
-      try {
-        await invoke("start_recording");
-      } catch (err) {
-        recording = false;
-        mic.classList.remove("recording");
-        setBubble("录音失败：" + err);
-      }
-    } else {
-      recording = false;
-      mic.classList.remove("recording");
-      setBubble("思考中…");
-      try {
-        await invoke("stop_recording");
-      } catch (err) {
-        setBubble("发送失败：" + err);
-      }
-    }
-  });
-
-  // hover expands the window to fit the fixed-size controls; collapse back to
-  // just the character when the pointer leaves (unless typing or recording).
+  // hover expands the window (character stays put); collapse on leave
   const app = el("#app");
-  app.addEventListener("mouseenter", () => void expand());
+  app.addEventListener("mouseenter", () => void applyWindow(true));
   app.addEventListener("mouseleave", () => {
     const input = el("#chat-input") as HTMLInputElement;
     if (document.activeElement === input || recording) return;
-    void collapse();
+    if (textOpen) {
+      textOpen = false;
+      form.classList.add("hidden");
+    }
+    void applyWindow(false);
   });
 
-  // toolbar: cycle character size / close window
-  el("#size-btn").addEventListener("click", () => {
-    sizeIdx = (sizeIdx + 1) % PET_SIZES.length;
-    void expand(); // pointer is over the toolbar → stay expanded
+  // menu: voice / text / sizes / settings / close
+  el("#voice-btn").addEventListener("click", () => {
+    if (!recording) void startVoice();
+    else void stopVoice();
   });
-  el("#close-btn").addEventListener("click", () => {
-    void getCurrentWindow().close();
+  el("#text-btn").addEventListener("click", () => {
+    textOpen = !textOpen;
+    form.classList.toggle("hidden", !textOpen);
+    void applyWindow(true);
+    if (textOpen) (el("#chat-input") as HTMLInputElement).focus();
   });
-  await collapse();
+  document.querySelectorAll(".size-btn").forEach((b) =>
+    b.addEventListener("click", () => {
+      sizeIdx = Number((b as HTMLElement).dataset.size);
+      void applyWindow(expanded);
+    })
+  );
+  el("#settings-btn").addEventListener("click", () => {
+    setBubble("设置面板开发中…（下个版本）");
+  });
+  el("#close-btn").addEventListener("click", () => void getCurrentWindow().close());
+
+  await applyWindow(false);
 }
 
 window.addEventListener("DOMContentLoaded", init);
