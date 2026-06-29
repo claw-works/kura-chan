@@ -15,8 +15,8 @@
     "windows": [
       {
         "title": "kura-chan",
-        "width": 360,
-        "height": 560,
+        "width": 166,
+        "height": 200,
         "transparent": true,
         "decorations": false,
         "alwaysOnTop": true,

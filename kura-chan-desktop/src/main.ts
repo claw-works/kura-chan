@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
 
 let httpBase = "http://127.0.0.1:18099";
 let gender = "girl";
@@ -49,7 +50,26 @@ function setStatus(s: string) {
   el("#status").textContent = s;
 }
 function setBubble(s: string) {
-  el("#bubble").textContent = s;
+  const b = el("#bubble");
+  b.textContent = s;
+  b.classList.toggle("show", !!s);
+}
+
+// pet size presets [width, height] in logical px; smallest ~64px tall
+const SIZES: [number, number][] = [
+  [53, 64],
+  [100, 120],
+  [166, 200],
+  [250, 300],
+];
+let sizeIdx = 2;
+async function applySize() {
+  const [w, h] = SIZES[sizeIdx];
+  try {
+    await getCurrentWindow().setSize(new LogicalSize(w, h));
+  } catch (err) {
+    console.error("setSize failed", err);
+  }
 }
 
 function label(s: string): string {
@@ -219,6 +239,16 @@ async function init() {
       }
     }
   });
+
+  // toolbar: cycle pet size / close window
+  el("#size-btn").addEventListener("click", () => {
+    sizeIdx = (sizeIdx + 1) % SIZES.length;
+    void applySize();
+  });
+  el("#close-btn").addEventListener("click", () => {
+    void getCurrentWindow().close();
+  });
+  await applySize();
 }
 
 window.addEventListener("DOMContentLoaded", init);
