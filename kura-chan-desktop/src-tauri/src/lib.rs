@@ -96,10 +96,13 @@ pub fn run() {
                     else {
                         continue;
                     };
-                    let now_inside = cur.x >= pos.x as f64
-                        && cur.x <= pos.x as f64 + size.width as f64
-                        && cur.y >= pos.y as f64
-                        && cur.y <= pos.y as f64 + size.height as f64;
+                    // hysteresis: once inside, require leaving by a margin before
+                    // reporting outside — avoids edge flicker and resize races.
+                    let m = if inside { 30.0 } else { 0.0 };
+                    let now_inside = cur.x >= pos.x as f64 - m
+                        && cur.x <= pos.x as f64 + size.width as f64 + m
+                        && cur.y >= pos.y as f64 - m
+                        && cur.y <= pos.y as f64 + size.height as f64 + m;
                     if now_inside != inside {
                         inside = now_inside;
                         let _ = win.emit("hover", now_inside);

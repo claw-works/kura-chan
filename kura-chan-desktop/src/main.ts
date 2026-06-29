@@ -316,18 +316,28 @@ async function init() {
     }
   });
 
-  // pointer hover via global cursor polling (works even when window isn't focused)
+  // pointer hover via global cursor polling (works even when window isn't focused).
+  // expand immediately; debounce collapse to absorb edge flicker + resize races.
+  let collapseTimer: number | undefined;
   await listen<boolean>("hover", (e) => {
     if (e.payload) {
-      void applyWindow(true);
-    } else {
-      const input = el("#chat-input") as HTMLInputElement;
-      if (document.activeElement === input || recording) return;
-      if (textOpen) {
-        textOpen = false;
-        form.classList.add("hidden");
+      if (collapseTimer) {
+        clearTimeout(collapseTimer);
+        collapseTimer = undefined;
       }
-      void applyWindow(false);
+      if (!expanded) void applyWindow(true);
+    } else {
+      if (collapseTimer) clearTimeout(collapseTimer);
+      collapseTimer = window.setTimeout(() => {
+        collapseTimer = undefined;
+        const input = el("#chat-input") as HTMLInputElement;
+        if (document.activeElement === input || recording) return;
+        if (textOpen) {
+          textOpen = false;
+          form.classList.add("hidden");
+        }
+        if (expanded) void applyWindow(false);
+      }, 500);
     }
   });
 
