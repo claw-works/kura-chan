@@ -13,11 +13,17 @@ use tokio::sync::{mpsc, Mutex};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 
+/// An outgoing WS message: JSON text (hello / text input) or a binary audio frame.
+pub enum WsOut {
+    Text(String),
+    Binary(Vec<u8>),
+}
+
 /// Managed Tauri state: outgoing-message sender, the server's HTTP base (for the
 /// frontend to fetch portrait PNGs), and the current connection status (so the
 /// frontend can query it on startup — events emitted before it subscribes are lost).
 pub struct WsHandle {
-    pub tx: mpsc::UnboundedSender<String>,
+    pub tx: mpsc::UnboundedSender<WsOut>,
     pub http_base: String,
     pub status: Arc<StdMutex<String>>,
 }
@@ -37,7 +43,7 @@ pub fn connect(
     api_key: String,
     device_id: String,
 ) -> WsHandle {
-    let (tx, rx) = mpsc::unbounded_channel::<String>();
+    let (tx, rx) = mpsc::unbounded_channel::<WsOut>();
     let rx = Arc::new(Mutex::new(rx));
     let status = Arc::new(StdMutex::new("connecting".to_string()));
     let status2 = status.clone();
@@ -61,7 +67,7 @@ async fn run_conn(
     ws_url: &str,
     api_key: &str,
     device_id: &str,
-    rx: &mut mpsc::UnboundedReceiver<String>,
+    rx: &mut mpsc::UnboundedReceiver<WsOut>,
     status: &Arc<StdMutex<String>>,
 ) -> Result<(), String> {
     let mut req = ws_url.into_client_request().map_err(|e| e.to_string())?;
@@ -113,8 +119,12 @@ async fn run_conn(
                 Some(Err(e)) => return Err(e.to_string()),
             },
             outgoing = rx.recv() => match outgoing {
-                Some(txt) => write
-                    .send(Message::Text(txt.into()))
+                Some(WsOut::Text(t)) => write
+                    .send(Message::Text(t.into()))
+                    .await
+                    .map_err(|e| e.to_string())?,
+                Some(WsOut::Binary(b)) => write
+                    .send(Message::Binary(b.into()))
                     .await
                     .map_err(|e| e.to_string())?,
                 None => break,

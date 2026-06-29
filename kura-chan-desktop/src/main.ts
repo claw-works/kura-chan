@@ -5,6 +5,7 @@ let httpBase = "http://127.0.0.1:18099";
 let gender = "girl";
 let appearance: Record<string, any> = {};
 let subtitle = "";
+let recording = false;
 
 // ---- audio playback (TTS): PCM16/16k chunks scheduled back-to-back via Web Audio ----
 let audioCtx: AudioContext | null = null;
@@ -125,6 +126,34 @@ async function init() {
       await invoke("send_text", { text });
     } catch (err) {
       setBubble("发送失败：" + err);
+    }
+  });
+
+  // mic button: click to start recording, click again to stop & send
+  const mic = el("#mic-btn");
+  mic.addEventListener("click", async () => {
+    ensureCtx(); // unlock audio output on user gesture
+    if (!recording) {
+      recording = true;
+      mic.classList.add("recording");
+      subtitle = "";
+      setBubble("聆听中…");
+      try {
+        await invoke("start_recording");
+      } catch (err) {
+        recording = false;
+        mic.classList.remove("recording");
+        setBubble("录音失败：" + err);
+      }
+    } else {
+      recording = false;
+      mic.classList.remove("recording");
+      setBubble("思考中…");
+      try {
+        await invoke("stop_recording");
+      } catch (err) {
+        setBubble("发送失败：" + err);
+      }
     }
   });
 }

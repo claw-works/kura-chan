@@ -94,3 +94,23 @@ body {
 .chat button:hover {
   background: rgba(102, 187, 153, 1);
 }
+
+#mic-btn {
+  background: rgba(60, 60, 70, 0.85);
+}
+#mic-btn:hover {
+  background: rgba(80, 80, 92, 0.95);
+}
+#mic-btn.recording {
+  background: rgba(220, 70, 70, 0.95);
+  animation: pulse 1s ease-in-out infinite;
+}
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
+}
