@@ -28,7 +28,10 @@ body {
 /* character: fills the window, only vertical breathing (no scale) */
 #stage {
   position: absolute;
-  inset: 0;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: var(--pet-h, 200px);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -37,8 +40,8 @@ body {
 .portrait,
 .face {
   position: absolute;
-  max-height: 90%;
-  max-width: 92%;
+  max-height: 100%;
+  max-width: 100%;
   object-fit: contain;
   -webkit-user-drag: none;
 }

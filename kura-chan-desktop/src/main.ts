@@ -55,18 +55,32 @@ function setBubble(s: string) {
   b.classList.toggle("show", !!s);
 }
 
-// pet size presets [width, height] in logical px; smallest ~64px tall
-const SIZES: [number, number][] = [
-  [53, 64],
-  [100, 120],
-  [166, 200],
-  [250, 300],
-];
+// Only the CHARACTER scales (via --pet-h); controls stay fixed-size and the
+// window expands on hover to fit them, then collapses back to just the pet.
+const PET_SIZES = [64, 120, 200, 300];
+const PET_RATIO = 0.83; // character width / height
+const CTRL_W = 240; // fixed control area width (expanded)
+const CTRL_H = 92; // fixed control area height (toolbar + chat row)
 let sizeIdx = 2;
-async function applySize() {
-  const [w, h] = SIZES[sizeIdx];
+
+function petDims(): [number, number] {
+  const h = PET_SIZES[sizeIdx];
+  return [Math.max(60, Math.round(h * PET_RATIO)), h];
+}
+async function collapse() {
+  const [w, h] = petDims();
+  document.documentElement.style.setProperty("--pet-h", h + "px");
   try {
     await getCurrentWindow().setSize(new LogicalSize(w, h));
+  } catch (err) {
+    console.error("setSize failed", err);
+  }
+}
+async function expand() {
+  const [w, h] = petDims();
+  document.documentElement.style.setProperty("--pet-h", h + "px");
+  try {
+    await getCurrentWindow().setSize(new LogicalSize(Math.max(w, CTRL_W), h + CTRL_H));
   } catch (err) {
     console.error("setSize failed", err);
   }
@@ -240,15 +254,25 @@ async function init() {
     }
   });
 
-  // toolbar: cycle pet size / close window
+  // hover expands the window to fit the fixed-size controls; collapse back to
+  // just the character when the pointer leaves (unless typing or recording).
+  const app = el("#app");
+  app.addEventListener("mouseenter", () => void expand());
+  app.addEventListener("mouseleave", () => {
+    const input = el("#chat-input") as HTMLInputElement;
+    if (document.activeElement === input || recording) return;
+    void collapse();
+  });
+
+  // toolbar: cycle character size / close window
   el("#size-btn").addEventListener("click", () => {
-    sizeIdx = (sizeIdx + 1) % SIZES.length;
-    void applySize();
+    sizeIdx = (sizeIdx + 1) % PET_SIZES.length;
+    void expand(); // pointer is over the toolbar → stay expanded
   });
   el("#close-btn").addEventListener("click", () => {
     void getCurrentWindow().close();
   });
-  await applySize();
+  await collapse();
 }
 
 window.addEventListener("DOMContentLoaded", init);
