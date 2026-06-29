@@ -37,6 +37,17 @@ fn stop_recording(recorder: State<Recorder>, ws: State<WsHandle>) {
     audio::send_pcm(&ws.tx, &pcm);
 }
 
+/// Read a dropped file as UTF-8 text (small files only). Used by drag-and-drop:
+/// the frontend reads the file then sends its content into the conversation.
+#[tauri::command]
+fn read_dropped(path: String) -> Result<String, String> {
+    let meta = std::fs::metadata(&path).map_err(|e| e.to_string())?;
+    if meta.len() > 200_000 {
+        return Err("文件太大(>200KB)".into());
+    }
+    std::fs::read_to_string(&path).map_err(|_| "不是文本文件或无法读取".to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -72,7 +83,8 @@ pub fn run() {
             send_text,
             get_config,
             start_recording,
-            stop_recording
+            stop_recording,
+            read_dropped
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

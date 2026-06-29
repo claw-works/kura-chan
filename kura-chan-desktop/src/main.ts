@@ -238,6 +238,26 @@ async function init() {
     stopTalk();
   });
 
+  // drag-and-drop: drop a text file onto the pet → read it and send as a message
+  await getCurrentWindow().onDragDropEvent(async (ev) => {
+    const pl = ev.payload as any;
+    if (pl?.type !== "drop" || !Array.isArray(pl.paths)) return;
+    for (const path of pl.paths) {
+      const name = String(path).split(/[\\/]/).pop();
+      try {
+        const content = await invoke<string>("read_dropped", { path });
+        ensureCtx();
+        subtitle = "";
+        setBubble("📎 " + name);
+        await invoke("send_text", {
+          text: `（我拖给你一个文件「${name}」，内容如下）\n${content}`,
+        });
+      } catch (err) {
+        setBubble("📎 " + name + " 读取失败：" + err);
+      }
+    }
+  });
+
   try {
     const cfg = await invoke<{ httpBase: string; status: string }>("get_config");
     if (cfg?.httpBase) httpBase = cfg.httpBase;
