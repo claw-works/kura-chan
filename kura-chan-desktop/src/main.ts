@@ -6,6 +6,36 @@ let gender = "girl";
 let appearance: Record<string, any> = {};
 let subtitle = "";
 
+// ---- audio playback (TTS): PCM16/16k chunks scheduled back-to-back via Web Audio ----
+let audioCtx: AudioContext | null = null;
+let nextAudioTime = 0;
+function ensureCtx(): AudioContext {
+  if (!audioCtx) audioCtx = new AudioContext();
+  if (audioCtx.state === "suspended") void audioCtx.resume();
+  return audioCtx;
+}
+function playPcmChunk(b64: string) {
+  const ctx = ensureCtx();
+  const bin = atob(b64);
+  const n = bin.length >> 1; // PCM16 LE mono
+  if (n === 0) return;
+  const buf = ctx.createBuffer(1, n, 16000);
+  const ch = buf.getChannelData(0);
+  for (let i = 0; i < n; i++) {
+    const lo = bin.charCodeAt(i * 2);
+    const hi = bin.charCodeAt(i * 2 + 1);
+    let s = (hi << 8) | lo;
+    if (s >= 0x8000) s -= 0x10000;
+    ch[i] = s / 32768;
+  }
+  const src = ctx.createBufferSource();
+  src.buffer = buf;
+  src.connect(ctx.destination);
+  const t = Math.max(nextAudioTime, ctx.currentTime);
+  src.start(t);
+  nextAudioTime = t + buf.duration;
+}
+
 function el(sel: string): HTMLElement {
   return document.querySelector(sel)!;
 }
@@ -24,8 +54,7 @@ function label(s: string): string {
   return s;
 }
 
-// Appearance values may be a full filename ("40_costume_pajamas_pink.png") or a
-// bare variant ("pajamas_pink"); composite_png wants the variant.
+// Appearance values may be a full filename or a bare variant; composite wants the variant.
 function variant(val: any, slot: string): string {
   if (typeof val !== "string" || !val) return "";
   let v = val.replace(/\.(png|webp|jpe?g)$/i, "");
@@ -39,11 +68,8 @@ function loadPortrait() {
   const a = appearance || {};
   const p = new URLSearchParams();
   p.set("h", "480");
-  // Use the shared actor's appearance from the server; fall back to a dressed
-  // default so we never render the bare (bald/naked) base body.
   const hairBack = variant(a.hair_back, "hair_back") || "short_black";
-  // front hair matches back hair (front/back halves of the same hairstyle);
-  // fall back to the back-hair variant so the fringe is never missing.
+  // front hair matches back hair; fall back so the fringe is never missing
   const hairFront = variant(a.hair_front, "hair_front") || hairBack;
   const costume = variant(a.costume, "costume") || "jacket";
   p.set("hair_back", hairBack);
@@ -53,12 +79,11 @@ function loadPortrait() {
     p.set("blush", typeof a.blush === "string" ? variant(a.blush, "blush") || "faint" : "faint");
   }
   if (a.glasses === true) p.set("glasses", "1");
-  p.set("t", String(Date.now())); // cache-bust on appearance change
+  p.set("t", String(Date.now()));
   img.src = `${httpBase}/assets/composite_png/${gender}?${p.toString()}`;
 }
 
 async function init() {
-  // subscribe FIRST so we don't miss events emitted during connect
   await listen<string>("ws-status", (e) => setStatus(label(String(e.payload))));
   await listen<any>("subtitle", (e) => {
     subtitle += e.payload?.text ?? "";
@@ -67,9 +92,15 @@ async function init() {
   await listen<any>("sync", (e) => {
     const p = e.payload;
     if (p?.gender) gender = p.gender;
-    if (p?.appearance) appearance = p.appearance; // full appearance on connect
+    if (p?.appearance) appearance = p.appearance;
     loadPortrait();
   });
+  // TTS audio: reset schedule at reply start, then play each PCM chunk
+  await listen("audio-start", () => {
+    const ctx = ensureCtx();
+    nextAudioTime = ctx.currentTime;
+  });
+  await listen<string>("audio", (e) => playPcmChunk(e.payload as string));
 
   try {
     const cfg = await invoke<{ httpBase: string; status: string }>("get_config");
@@ -86,6 +117,7 @@ async function init() {
     const input = el("#chat-input") as HTMLInputElement;
     const text = input.value.trim();
     if (!text) return;
+    ensureCtx(); // unlock audio on user gesture (autoplay policy)
     subtitle = "";
     setBubble("…");
     input.value = "";

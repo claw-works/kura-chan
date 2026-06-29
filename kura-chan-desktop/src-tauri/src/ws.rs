@@ -107,7 +107,7 @@ async fn run_conn(
         tokio::select! {
             incoming = read.next() => match incoming {
                 Some(Ok(Message::Text(t))) => handle_server_text(app, t.as_str()),
-                Some(Ok(Message::Binary(_b))) => { /* TODO: audio playback (voice stage) */ }
+                Some(Ok(Message::Binary(b))) => handle_audio_frame(app, &b),
                 Some(Ok(Message::Close(_))) | None => break,
                 Some(Ok(_)) => {}
                 Some(Err(e)) => return Err(e.to_string()),
@@ -139,4 +139,24 @@ fn handle_server_text(app: &AppHandle, text: &str) {
         "speak_done" => { let _ = app.emit("speak_done", ()); }
         _ => {}
     }
+}
+
+/// Decode an AUDIO_OUTPUT frame ([0x02, flags, len:u16, PCM16 payload]) and
+/// forward the PCM to the frontend (base64) for Web Audio playback. The START
+/// flag tells the frontend to reset its playback schedule (new reply).
+fn handle_audio_frame(app: &AppHandle, data: &[u8]) {
+    if data.len() < 4 || data[0] != 0x02 {
+        return; // not an AUDIO_OUTPUT frame
+    }
+    let flags = data[1];
+    if flags & 0x01 != 0 {
+        let _ = app.emit("audio-start", ());
+    }
+    let payload = &data[4..];
+    if payload.is_empty() {
+        return;
+    }
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(payload);
+    let _ = app.emit("audio", b64);
 }
