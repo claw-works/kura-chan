@@ -22,7 +22,6 @@ const MENU_H = 40; // menu row
 const FORM_H = 48; // text input row (when open)
 let sizeIdx = 1;
 let expanded = false;
-let curW = 0; // tracked current window logical width
 let curCH = 0; // tracked current control height (0 when collapsed)
 let curMode: "collapsed" | "down" | "up" = "collapsed";
 let textOpen = false;
@@ -45,13 +44,13 @@ async function applyWindow(expand: boolean) {
     const sf = await win.scaleFactor();
     const lx = pos.x / sf;
     const ly = pos.y / sf;
-    // Reconstruct the pet's fixed screen rect from the current window + mode, so
-    // it stays put across collapse/expand/size/direction changes.
-    const petCenterX = lx + (curW || newW) / 2;
-    const petTop = curMode === "up" ? ly + curCH : ly;
+    // Pet is LEFT-anchored in the window (no horizontal centering) so a width
+    // change needs no setPosition → no flicker. Reconstruct the pet's screen
+    // top-left from the current window + mode.
+    const petX = lx;
+    const petY = curMode === "up" ? ly + curCH : ly;
 
-    // Edge detection: if there's not enough room below the pet, open controls
-    // ABOVE it (window grows upward) instead of clipping off-screen.
+    // edge detection: open controls above the pet if there's no room below
     let ctrlTop = false;
     if (expand && ch > 0) {
       try {
@@ -59,24 +58,27 @@ async function applyWindow(expand: boolean) {
         if (mon) {
           const msf = mon.scaleFactor || sf;
           const screenBottom = (mon.position.y + mon.size.height) / msf;
-          ctrlTop = petTop + ph + ch + 8 > screenBottom;
+          ctrlTop = petY + ph + ch + 8 > screenBottom;
         }
       } catch {
-        /* no monitor info → default downward */
+        /* default downward */
       }
     }
 
-    const winLeft = petCenterX - newW / 2;
-    const winTop = ctrlTop ? petTop - ch : petTop;
+    const winX = petX;
+    const winY = ctrlTop ? petY - ch : petY;
 
     document.documentElement.style.setProperty("--pet-h", ph + "px");
     document.documentElement.style.setProperty("--ctrl-h", ch + "px");
     document.body.classList.toggle("ctrl-top", ctrlTop);
 
     await win.setSize(new LogicalSize(newW, newH));
-    if (curW) await win.setPosition(new LogicalPosition(Math.round(winLeft), Math.round(winTop)));
+    // only move when the top-left actually changes (i.e. opening upward); the
+    // common down-expand keeps the same top-left → no setPosition, no flicker.
+    if (Math.round(winX) !== Math.round(lx) || Math.round(winY) !== Math.round(ly)) {
+      await win.setPosition(new LogicalPosition(Math.round(winX), Math.round(winY)));
+    }
 
-    curW = newW;
     curCH = ch;
     curMode = !expand ? "collapsed" : ctrlTop ? "up" : "down";
     expanded = expand;

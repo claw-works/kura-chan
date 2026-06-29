@@ -34,7 +34,7 @@ body {
   height: var(--pet-h, 200px);
   display: flex;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
   animation: breathe 4s ease-in-out infinite;
 }
 /* edge detection: when controls open ABOVE the pet (near screen bottom) */
