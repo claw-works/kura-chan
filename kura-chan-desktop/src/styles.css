@@ -82,6 +82,9 @@ body.menu-left #app {
 #app:hover #menu {
   opacity: 1;
 }
+body.dragging #menu {
+  opacity: 0 !important;
+}
 #menu button {
   width: 32px;
   height: 32px;

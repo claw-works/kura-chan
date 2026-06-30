@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { getCurrentWindow, LogicalSize, currentMonitor } from "@tauri-apps/api/window";
+import { getCurrentWindow, LogicalSize, LogicalPosition, currentMonitor } from "@tauri-apps/api/window";
 
 let httpBase = "http://127.0.0.1:18099";
 let gender = "girl";
@@ -35,6 +35,7 @@ async function applySize() {
   const winH = Math.max(ph, MENU_MIN_H) + (textOpen ? FORM_H : 0);
   try {
     await getCurrentWindow().setSize(new LogicalSize(winW, winH));
+    await clampToScreen();
   } catch (err) {
     console.error("setSize failed", err);
   }
@@ -54,6 +55,36 @@ async function updateSide() {
     const winCenterX = (pos.x + size.width / 2) / msf;
     const screenCenterX = (mon.position.x + mon.size.width / 2) / msf;
     document.body.classList.toggle("menu-left", winCenterX > screenCenterX);
+  } catch {
+    /* ignore */
+  }
+}
+
+// keep the whole window (pet + menu) on screen so the menu is never clipped
+async function clampToScreen() {
+  try {
+    const win = getCurrentWindow();
+    const [pos, size, sf, mon] = await Promise.all([
+      win.outerPosition(),
+      win.outerSize(),
+      win.scaleFactor(),
+      currentMonitor(),
+    ]);
+    if (!mon) return;
+    const msf = mon.scaleFactor || sf;
+    const x = pos.x / msf;
+    const y = pos.y / msf;
+    const w = size.width / msf;
+    const h = size.height / msf;
+    const sx = mon.position.x / msf;
+    const sy = mon.position.y / msf;
+    const sw = mon.size.width / msf;
+    const sh = mon.size.height / msf;
+    const nx = Math.min(Math.max(x, sx), sx + sw - w);
+    const ny = Math.min(Math.max(y, sy), sy + sh - h);
+    if (Math.round(nx) !== Math.round(x) || Math.round(ny) !== Math.round(y)) {
+      await win.setPosition(new LogicalPosition(Math.round(nx), Math.round(ny)));
+    }
   } catch {
     /* ignore */
   }
@@ -212,7 +243,7 @@ async function stopVoice() {
 }
 
 async function init() {
-  await listen<string>("ws-status", (e) => setStatus(label(String(e.payload))));
+  await listen<string>("ws-status", (e) => setStatus(String(e.payload)));
   await listen<any>("subtitle", (e) => {
     subtitle += e.payload?.text ?? "";
     if (subtitle) setBubble(subtitle);
@@ -267,13 +298,17 @@ async function init() {
   let moveTimer: number | undefined;
   await getCurrentWindow().onMoved(() => {
     if (moveTimer) clearTimeout(moveTimer);
-    moveTimer = window.setTimeout(() => void updateSide(), 250);
+    moveTimer = window.setTimeout(async () => {
+      document.body.classList.remove("dragging");
+      await updateSide();
+      await clampToScreen();
+    }, 250);
   });
 
   try {
     const cfg = await invoke<{ httpBase: string; status: string }>("get_config");
     if (cfg?.httpBase) httpBase = cfg.httpBase;
-    if (cfg?.status) setStatus(label(cfg.status));
+    if (cfg?.status) setStatus(cfg.status);
   } catch {
     /* keep defaults */
   }
@@ -297,6 +332,7 @@ async function init() {
     const me = e as MouseEvent;
     if (me.buttons !== 1) return;
     if (Math.abs(me.screenX - dragStartX) > 4 || Math.abs(me.screenY - dragStartY) > 4) {
+      document.body.classList.add("dragging");
       void getCurrentWindow().startDragging();
     }
   });
