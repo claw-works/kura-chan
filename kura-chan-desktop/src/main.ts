@@ -390,9 +390,46 @@ async function init() {
     sizeIdx = (sizeIdx + 1) % PET_SIZES.length;
     void applySize();
   });
-  el("#settings-btn").addEventListener("click", () => {
-    setBubble("设置面板开发中…（下个版本）");
+  el("#settings-btn").addEventListener("click", () => void openSettings());
+  el("#set-cancel").addEventListener("click", () => void closeSettings());
+  el("#set-save").addEventListener("click", async () => {
+    try {
+      await invoke("save_settings", {
+        wsUrl: (el("#set-ws") as HTMLInputElement).value.trim(),
+        httpBase: (el("#set-http") as HTMLInputElement).value.trim(),
+        apiKey: (el("#set-key") as HTMLInputElement).value.trim(),
+        deviceId: (el("#set-dev") as HTMLInputElement).value.trim(),
+      });
+      el("#set-msg").textContent = "已保存，重启应用后生效";
+    } catch (err) {
+      el("#set-msg").textContent = "保存失败：" + err;
+    }
   });
+}
+
+async function openSettings() {
+  document.body.classList.remove("menu-open");
+  try {
+    const s = await invoke<any>("get_settings");
+    (el("#set-ws") as HTMLInputElement).value = s.wsUrl || "";
+    (el("#set-http") as HTMLInputElement).value = s.httpBase || "";
+    (el("#set-key") as HTMLInputElement).value = s.apiKey || "";
+    (el("#set-dev") as HTMLInputElement).value = s.deviceId || "";
+  } catch {
+    /* ignore */
+  }
+  el("#set-msg").textContent = "";
+  document.body.classList.add("settings-open");
+  try {
+    await getCurrentWindow().setSize(new LogicalSize(340, 360));
+    await clampToScreen();
+  } catch (err) {
+    console.error(err);
+  }
+}
+async function closeSettings() {
+  document.body.classList.remove("settings-open");
+  await applySize();
 }
 
 window.addEventListener("DOMContentLoaded", init);

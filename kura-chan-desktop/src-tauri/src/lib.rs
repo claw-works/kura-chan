@@ -1,10 +1,94 @@
 mod audio;
 mod ws;
 
+use std::collections::HashMap;
+use std::path::PathBuf;
+
 use audio::Recorder;
 use serde_json::json;
 use tauri::{Manager, State};
 use ws::{WsHandle, WsOut};
+
+/// ~/.kura — agent data dir (config, later: skills, chat history, etc.)
+fn kura_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".kura"))
+}
+/// Parse ~/.kura/.env (KEY=VALUE lines) into a map.
+fn load_kura_env() -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    if let Some(path) = kura_dir().map(|d| d.join(".env")) {
+        if let Ok(content) = std::fs::read_to_string(path) {
+            for line in content.lines() {
+                let l = line.trim();
+                if l.is_empty() || l.starts_with('#') {
+                    continue;
+                }
+                if let Some((k, v)) = l.split_once('=') {
+                    map.insert(k.trim().to_string(), v.trim().trim_matches('"').to_string());
+                }
+            }
+        }
+    }
+    map
+}
+
+#[derive(Clone)]
+struct Settings {
+    ws_url: String,
+    http_base: String,
+    api_key: String,
+    device_id: String,
+}
+/// Resolve settings: ~/.kura/.env > process env > built-in default.
+fn load_settings() -> Settings {
+    let kenv = load_kura_env();
+    let get = |k: &str, d: &str| {
+        kenv.get(k)
+            .cloned()
+            .or_else(|| std::env::var(k).ok())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| d.to_string())
+    };
+    Settings {
+        ws_url: get("KURA_WS_URL", "ws://127.0.0.1:18099/ws/device"),
+        http_base: get("KURA_HTTP_BASE", "http://127.0.0.1:18099"),
+        api_key: get("KURA_API_KEY", ""),
+        device_id: get("KURA_DEVICE_ID", "KURA_DESKTOP_001"),
+    }
+}
+
+/// Current settings for the settings UI.
+#[tauri::command]
+fn get_settings() -> serde_json::Value {
+    let s = load_settings();
+    json!({
+        "wsUrl": s.ws_url,
+        "httpBase": s.http_base,
+        "apiKey": s.api_key,
+        "deviceId": s.device_id,
+    })
+}
+
+/// Write settings to ~/.kura/.env. Takes effect on next launch (reconnect TBD).
+#[tauri::command]
+fn save_settings(
+    ws_url: String,
+    http_base: String,
+    api_key: String,
+    device_id: String,
+) -> Result<(), String> {
+    let dir = kura_dir().ok_or_else(|| "no HOME".to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let content = format!(
+        "# Kura-chan 桌面端配置（设置面板写入）\n\
+         KURA_WS_URL={ws_url}\n\
+         KURA_HTTP_BASE={http_base}\n\
+         KURA_API_KEY={api_key}\n\
+         KURA_DEVICE_ID={device_id}\n"
+    );
+    std::fs::write(dir.join(".env"), content).map_err(|e| e.to_string())?;
+    Ok(())
+}
 
 /// Send a typed message to the agent (text input → server, bypasses STT).
 #[tauri::command]
@@ -53,15 +137,15 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-            // Connection config from env for now (a tray settings UI comes later).
-            let ws_url = std::env::var("KURA_WS_URL")
-                .unwrap_or_else(|_| "ws://127.0.0.1:18099/ws/device".into());
-            let http_base = std::env::var("KURA_HTTP_BASE")
-                .unwrap_or_else(|_| "http://127.0.0.1:18099".into());
-            let api_key = std::env::var("KURA_API_KEY").unwrap_or_default();
-            let device_id =
-                std::env::var("KURA_DEVICE_ID").unwrap_or_else(|_| "KURA_DESKTOP_001".into());
-            let handle = ws::connect(app.handle().clone(), ws_url, http_base, api_key, device_id);
+            // Connection config from ~/.kura/.env (falls back to env / defaults).
+            let s = load_settings();
+            let handle = ws::connect(
+                app.handle().clone(),
+                s.ws_url,
+                s.http_base,
+                s.api_key,
+                s.device_id,
+            );
             app.manage(handle);
             app.manage(Recorder::new());
 
@@ -84,7 +168,9 @@ pub fn run() {
             get_config,
             start_recording,
             stop_recording,
-            read_dropped
+            read_dropped,
+            get_settings,
+            save_settings
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

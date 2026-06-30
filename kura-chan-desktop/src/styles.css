@@ -184,3 +184,72 @@ body.dragging #menu {
   font-size: 13px;
   cursor: pointer;
 }
+
+/* settings panel — shown (window expanded) only in settings mode */
+.settings {
+  position: fixed;
+  inset: 0;
+  display: none;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px;
+  background: rgba(18, 18, 24, 0.97);
+  overflow-y: auto;
+}
+body.settings-open .settings {
+  display: flex;
+}
+body.settings-open #stage,
+body.settings-open #menu,
+body.settings-open #bubble,
+body.settings-open #chat-form {
+  display: none;
+}
+.settings h3 {
+  font-size: 15px;
+  font-weight: 600;
+}
+.settings label {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.75);
+}
+.settings input {
+  padding: 7px 9px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  background: rgba(36, 36, 44, 0.95);
+  color: #fff;
+  font-size: 13px;
+  outline: none;
+}
+.settings input:focus {
+  border-color: rgba(102, 187, 153, 0.8);
+}
+.set-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+.set-row button {
+  flex: 1;
+  padding: 8px;
+  border-radius: 8px;
+  border: none;
+  font-size: 13px;
+  cursor: pointer;
+  color: #fff;
+}
+#set-save {
+  background: rgba(85, 170, 136, 0.95);
+}
+#set-cancel {
+  background: rgba(70, 70, 82, 0.95);
+}
+#set-msg {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.7);
+  min-height: 16px;
+}

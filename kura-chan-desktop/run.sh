@@ -1,29 +1,13 @@
 #!/usr/bin/env bash
-# Kura-chan 桌面端启动脚本：加载 env → 装依赖 → 起 Tauri dev。
-# 用法：
-#   cp kura-desktop.env.example kura-desktop.env   # 填 server 地址 + api_key
-#   ./run.sh
+# Kura-chan 桌面端启动脚本。
+# 配置读自 ~/.kura/.env（应用内 ⚙ 设置面板可修改并保存）。
 set -euo pipefail
 cd "$(dirname "$0")"
 
-ENV_FILE="${ENV_FILE:-kura-desktop.env}"
-if [ -f "$ENV_FILE" ]; then
-  set -a
-  # shellcheck disable=SC1090
-  source "$ENV_FILE"
-  set +a
-else
-  echo "[kura-desktop] 未找到 $ENV_FILE，使用默认值（api_key 为空会连不上）。"
-  echo "               cp kura-desktop.env.example $ENV_FILE 然后填写。"
+if [ ! -f "$HOME/.kura/.env" ]; then
+  echo "[kura-desktop] 提示: ~/.kura/.env 不存在 — 将用默认配置(连本地 127.0.0.1:18099)。"
+  echo "               启动后在应用内 ⚙ 设置里填 server 地址 / api_key 并保存即可。"
 fi
-
-# 默认值（env 未设置时回退）
-export KURA_WS_URL="${KURA_WS_URL:-ws://127.0.0.1:18099/ws/device}"
-export KURA_HTTP_BASE="${KURA_HTTP_BASE:-http://127.0.0.1:18099}"
-export KURA_DEVICE_ID="${KURA_DEVICE_ID:-KURA_DESKTOP_001}"
-export KURA_API_KEY="${KURA_API_KEY:-}"
-
-echo "[kura-desktop] WS=$KURA_WS_URL  HTTP=$KURA_HTTP_BASE  device=$KURA_DEVICE_ID  key=${KURA_API_KEY:+(set)}${KURA_API_KEY:-(empty)}"
 
 # 首次安装前端依赖
 if [ ! -d node_modules ]; then
@@ -31,5 +15,5 @@ if [ ! -d node_modules ]; then
   npm install
 fi
 
-# 前台启动（dev 模式：vite 前端 + Tauri 窗口；Ctrl-C 退出）
+# 前台启动（dev 模式：vite + Tauri 窗口）。Ctrl-C 或状态栏图标退出。
 exec npm run tauri dev

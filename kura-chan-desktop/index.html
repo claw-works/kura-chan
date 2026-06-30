@@ -25,6 +25,18 @@
         <input id="chat-input" placeholder="说点什么…" autocomplete="off" />
         <button type="submit">发送</button>
       </form>
+      <div id="settings" class="settings">
+        <h3>设置</h3>
+        <label>Server WS 地址<input id="set-ws" placeholder="ws://host:port/ws/device" /></label>
+        <label>HTTP 地址<input id="set-http" placeholder="http://host:port" /></label>
+        <label>API Key<input id="set-key" placeholder="kc_..." /></label>
+        <label>设备 ID<input id="set-dev" placeholder="KURA_DESKTOP_001" /></label>
+        <div class="set-row">
+          <button type="button" id="set-save">保存</button>
+          <button type="button" id="set-cancel">关闭</button>
+        </div>
+        <p id="set-msg"></p>
+      </div>
     </div>
   </body>
 </html>
