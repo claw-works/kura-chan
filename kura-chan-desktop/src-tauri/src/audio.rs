@@ -11,10 +11,14 @@ use tokio::sync::mpsc;
 use crate::ws::WsOut;
 
 const TARGET_RATE: f32 = 16000.0;
+const VAD_SPEAK_RMS: f64 = 0.02; // above this = speech
+const VAD_SILENCE_SECS: f32 = 3.0; // trailing silence to auto-stop
 
 pub struct Recorder {
     recording: Arc<AtomicBool>,
     buffer: Arc<Mutex<Vec<i16>>>,
+    done: Arc<AtomicBool>, // VAD: speech ended (trailing silence exceeded)
+    vad: Arc<Mutex<(bool, usize)>>, // (heard speech, trailing silence samples)
 }
 
 impl Recorder {
@@ -23,25 +27,44 @@ impl Recorder {
     pub fn new() -> Self {
         let recording = Arc::new(AtomicBool::new(false));
         let buffer = Arc::new(Mutex::new(Vec::<i16>::new()));
-        let rec = recording.clone();
-        let buf = buffer.clone();
-        std::thread::spawn(move || capture_thread(rec, buf));
-        Self { recording, buffer }
+        let done = Arc::new(AtomicBool::new(false));
+        let vad = Arc::new(Mutex::new((false, 0usize)));
+        std::thread::spawn({
+            let rec = recording.clone();
+            let buf = buffer.clone();
+            let done = done.clone();
+            let vad = vad.clone();
+            move || capture_thread(rec, buf, done, vad)
+        });
+        Self { recording, buffer, done, vad }
     }
 
     pub fn start(&self) {
         self.buffer.lock().unwrap().clear();
+        *self.vad.lock().unwrap() = (false, 0);
+        self.done.store(false, Ordering::Relaxed);
         self.recording.store(true, Ordering::Relaxed);
+    }
+
+    /// VAD detected the user stopped talking (trailing silence exceeded).
+    pub fn is_done(&self) -> bool {
+        self.done.load(Ordering::Relaxed)
     }
 
     /// Stop and return the captured PCM16/16k samples.
     pub fn stop(&self) -> Vec<i16> {
         self.recording.store(false, Ordering::Relaxed);
+        self.done.store(false, Ordering::Relaxed);
         std::mem::take(&mut *self.buffer.lock().unwrap())
     }
 }
 
-fn capture_thread(recording: Arc<AtomicBool>, buffer: Arc<Mutex<Vec<i16>>>) {
+fn capture_thread(
+    recording: Arc<AtomicBool>,
+    buffer: Arc<Mutex<Vec<i16>>>,
+    done: Arc<AtomicBool>,
+    vad: Arc<Mutex<(bool, usize)>>,
+) {
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
     let host = cpal::default_host();
     let Some(device) = host.default_input_device() else {
@@ -62,6 +85,8 @@ fn capture_thread(recording: Arc<AtomicBool>, buffer: Arc<Mutex<Vec<i16>>>) {
         cpal::SampleFormat::F32 => {
             let rec = recording.clone();
             let buf = buffer.clone();
+            let done = done.clone();
+            let vad = vad.clone();
             let phase = Arc::new(Mutex::new(0.0f32));
             device.build_input_stream(
                 &config.into(),
@@ -70,16 +95,41 @@ fn capture_thread(recording: Arc<AtomicBool>, buffer: Arc<Mutex<Vec<i16>>>) {
                         return;
                     }
                     let mut out = buf.lock().unwrap();
-                    let mut p = phase.lock().unwrap();
-                    let mut i = 0;
-                    while i < data.len() {
-                        *p -= 1.0;
-                        if *p < 0.0 {
-                            *p += ratio;
-                            let s = data[i]; // channel 0 of this frame
-                            out.push((s.clamp(-1.0, 1.0) * 32767.0) as i16);
+                    let start_len = out.len();
+                    {
+                        let mut p = phase.lock().unwrap();
+                        let mut i = 0;
+                        while i < data.len() {
+                            *p -= 1.0;
+                            if *p < 0.0 {
+                                *p += ratio;
+                                let s = data[i]; // channel 0 of this frame
+                                out.push((s.clamp(-1.0, 1.0) * 32767.0) as i16);
+                            }
+                            i += channels;
                         }
-                        i += channels;
+                    }
+                    // VAD on the samples just decimated: track trailing silence
+                    let pushed = &out[start_len..];
+                    if !pushed.is_empty() {
+                        let sum: f64 = pushed
+                            .iter()
+                            .map(|&s| {
+                                let f = s as f64 / 32768.0;
+                                f * f
+                            })
+                            .sum();
+                        let rms = (sum / pushed.len() as f64).sqrt();
+                        let mut v = vad.lock().unwrap();
+                        if rms > VAD_SPEAK_RMS {
+                            v.0 = true; // heard speech
+                            v.1 = 0; // reset trailing silence
+                        } else if v.0 {
+                            v.1 += pushed.len();
+                            if v.1 as f32 / TARGET_RATE > VAD_SILENCE_SECS {
+                                done.store(true, Ordering::Relaxed);
+                            }
+                        }
                     }
                 },
                 err_fn,

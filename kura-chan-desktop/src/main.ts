@@ -7,6 +7,7 @@ let gender = "girl";
 let appearance: Record<string, any> = {};
 let subtitle = "";
 let recording = false;
+let voicePoll: number | undefined; // VAD auto-stop poller
 
 // expression / animation
 let currentExpr = "neutral";
@@ -246,6 +247,17 @@ async function startVoice() {
   setBubble("聆听中…");
   try {
     await invoke("start_recording");
+    // VAD: auto-send when the user stops talking (≈3s trailing silence)
+    if (voicePoll) clearInterval(voicePoll);
+    voicePoll = window.setInterval(async () => {
+      try {
+        if (recording && (await invoke<boolean>("is_voice_done"))) {
+          await stopVoice();
+        }
+      } catch {
+        /* ignore */
+      }
+    }, 250);
   } catch (err) {
     recording = false;
     el("#voice-btn").classList.remove("recording");
@@ -253,6 +265,11 @@ async function startVoice() {
   }
 }
 async function stopVoice() {
+  if (voicePoll) {
+    clearInterval(voicePoll);
+    voicePoll = undefined;
+  }
+  if (!recording) return; // already stopped (avoid double send)
   recording = false;
   el("#voice-btn").classList.remove("recording");
   setBubble("思考中…");

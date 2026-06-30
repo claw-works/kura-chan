@@ -153,6 +153,13 @@ fn stop_recording(recorder: State<Recorder>, ws: State<WsHandle>) {
     audio::send_pcm(&ws.tx, &pcm);
 }
 
+/// VAD: has the user stopped talking (trailing silence)? Frontend polls this
+/// while recording to auto-send without a second button press.
+#[tauri::command]
+fn is_voice_done(recorder: State<Recorder>) -> bool {
+    recorder.is_done()
+}
+
 /// Fetch conversation history from the server (Bearer api_key), cache it to
 /// ~/.kura/history.json, and return it. Falls back to the cache when offline.
 #[tauri::command]
@@ -242,6 +249,7 @@ pub fn run() {
             get_config,
             start_recording,
             stop_recording,
+            is_voice_done,
             read_dropped,
             get_settings,
             save_settings,
