@@ -265,6 +265,7 @@ async function init() {
   await listen<string>("audio", (e) => playPcmChunk(e.payload as string));
   await listen("speak_done", () => {
     speaking = false;
+    currentExpr = "neutral"; // reset to neutral so blinking resumes after talking
     stopTalk();
   });
 
