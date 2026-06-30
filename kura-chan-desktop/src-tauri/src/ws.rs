@@ -104,7 +104,7 @@ async fn run_conn(
             "output_sample_rate": 16000,
             "output_channels": 1
         },
-        "capabilities": ["text", "notify", "read_file"]
+        "capabilities": ["text", "notify", "read_file", "list_dir"]
     });
     write
         .send(Message::Text(hello.to_string().into()))
@@ -228,6 +228,20 @@ async fn execute_tool(tx: mpsc::UnboundedSender<WsOut>, call: DeviceToolCall) {
     }
 }
 
+/// Expand a leading `~` / `~/` to the user's home directory.
+fn expand_path(p: &str) -> String {
+    if p == "~" {
+        if let Some(home) = std::env::var_os("HOME") {
+            return home.to_string_lossy().to_string();
+        }
+    } else if let Some(rest) = p.strip_prefix("~/") {
+        if let Some(home) = std::env::var_os("HOME") {
+            return format!("{}/{}", home.to_string_lossy(), rest);
+        }
+    }
+    p.to_string()
+}
+
 async fn run_tool(tool: &str, params: &serde_json::Value) -> (&'static str, serde_json::Value) {
     match tool {
         "notify" => {
@@ -239,11 +253,34 @@ async fn run_tool(tool: &str, params: &serde_json::Value) -> (&'static str, serd
         "read_file" => {
             // NOTE: reads an arbitrary path the user's agent chose. Trusted for
             // now (user's own machine); add a path allowlist / confirmation later.
-            let path = params.get("path").and_then(|v| v.as_str()).unwrap_or("");
-            match tokio::fs::read_to_string(path).await {
+            let path = expand_path(params.get("path").and_then(|v| v.as_str()).unwrap_or(""));
+            match tokio::fs::read_to_string(&path).await {
                 Ok(c) => {
                     let clipped: String = c.chars().take(4000).collect();
                     ("ok", json!({ "content": clipped }))
+                }
+                Err(e) => ("error", json!(e.to_string())),
+            }
+        }
+        "list_dir" => {
+            let path = expand_path(params.get("path").and_then(|v| v.as_str()).unwrap_or(""));
+            let filter = params
+                .get("filter")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_lowercase();
+            match tokio::fs::read_dir(&path).await {
+                Ok(mut rd) => {
+                    let mut entries: Vec<String> = Vec::new();
+                    while let Ok(Some(e)) = rd.next_entry().await {
+                        let name = e.file_name().to_string_lossy().to_string();
+                        if filter.is_empty() || name.to_lowercase().contains(&filter) {
+                            entries.push(name);
+                        }
+                    }
+                    entries.sort();
+                    entries.truncate(200);
+                    ("ok", json!({ "path": path, "count": entries.len(), "entries": entries }))
                 }
                 Err(e) => ("error", json!(e.to_string())),
             }

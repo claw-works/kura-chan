@@ -11,7 +11,7 @@ use crate::llm::ToolDef;
 
 /// Is `name` a device-executed tool (vs a server-side one)?
 pub fn is_device_tool(name: &str) -> bool {
-    matches!(name, "notify" | "read_file")
+    matches!(name, "notify" | "read_file" | "list_dir")
 }
 
 /// Tools available this turn, filtered by the device's declared capabilities.
@@ -39,7 +39,20 @@ pub fn available_tools(capabilities: &[String]) -> Vec<ToolDef> {
                 parameters: json!({
                     "type": "object",
                     "properties": {
-                        "path": {"type": "string", "description": "文件的绝对路径"}
+                        "path": {"type": "string", "description": "文件的绝对路径（支持 ~ 表示用户主目录）"}
+                    },
+                    "required": ["path"]
+                }),
+            }),
+            "list_dir" => tools.push(ToolDef {
+                name: "list_dir".into(),
+                description: "列出某个目录下的文件和子目录, 可选按关键词过滤文件名。用于『看看某目录有没有 xx 相关文件』这类查找需求(先列目录再决定要不要读)。"
+                    .into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "目录的绝对路径（支持 ~ 表示用户主目录, 如 ~/Downloads）"},
+                        "filter": {"type": "string", "description": "可选: 只返回文件名包含此关键词的项(不区分大小写)"}
                     },
                     "required": ["path"]
                 }),
