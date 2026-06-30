@@ -398,7 +398,9 @@ async function init() {
   }
   el("#chat-send").addEventListener("click", sendChat);
   chatInput.addEventListener("keydown", (e) => {
-    if ((e as KeyboardEvent).key === "Enter") {
+    const ke = e as KeyboardEvent;
+    // ignore Enter while IME is composing (e.g. selecting Chinese candidates)
+    if (ke.key === "Enter" && !ke.isComposing) {
       e.preventDefault();
       sendChat();
     }

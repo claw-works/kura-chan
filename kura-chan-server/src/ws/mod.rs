@@ -551,7 +551,7 @@ fn extract_tags(
             }
             buf.replace_range(open..close + 1, "");
             search = open;
-        } else if let Some(mood) = inner.strip_prefix("mood:") {
+        } else if let Some(mood) = inner.strip_prefix("mood:").or_else(|| inner.strip_prefix("mood=")) {
             out.push(ServerMessage::Response(AgentResponse {
                 text: String::new(),
                 emotion: mood.trim().to_string(),
@@ -579,7 +579,23 @@ fn extract_tags(
             buf.replace_range(open..close + 1, "");
             search = open;
         } else {
-            search = close + 1; // leave unrecognized tag, skip past it
+            // Unrecognized bracket: if it's tag-shaped (alpha key + ':'/'='),
+            // drop it so a mistyped tag like [mode=refuse] isn't spoken; otherwise
+            // it's genuine bracketed text, leave it.
+            let tag_shaped = {
+                let key: String =
+                    inner.chars().take_while(|c| *c != ':' && *c != '=').collect();
+                let has_sep = inner.contains(':') || inner.contains('=');
+                !key.is_empty()
+                    && has_sep
+                    && key.chars().all(|c| c.is_ascii_alphabetic() || c == '_')
+            };
+            if tag_shaped {
+                buf.replace_range(open..close + 1, "");
+                search = open;
+            } else {
+                search = close + 1; // genuine text, skip past it
+            }
         }
     }
     out
