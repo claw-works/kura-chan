@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { getCurrentWindow, LogicalSize, LogicalPosition, currentMonitor } from "@tauri-apps/api/window";
+import { getCurrentWindow, LogicalSize, LogicalPosition, PhysicalPosition, currentMonitor } from "@tauri-apps/api/window";
 
 let httpBase = "http://127.0.0.1:18099";
 let gender = "girl";
@@ -23,6 +23,7 @@ let chatMode = false;
 let ttsOn = true; // speaker toggle: play TTS audio or not
 let streamingBot: HTMLElement | null = null;
 let botBuf = "";
+let savedPos: { x: number; y: number } | null = null; // float-mode position to restore
 
 function applyDims(): { pw: number; ph: number } {
   const ph = PET_SIZES[sizeIdx];
@@ -40,6 +41,21 @@ async function applySize() {
     await clampToScreen();
   } catch (err) {
     console.error("setSize failed", err);
+  }
+}
+// restore float-mode size AND the position before settings/chat opened
+async function restoreFloat() {
+  const { pw, ph } = applyDims();
+  try {
+    await getCurrentWindow().setSize(new LogicalSize(pw + MENU_W, Math.max(ph, MENU_MIN_H)));
+    if (savedPos) {
+      await getCurrentWindow().setPosition(new PhysicalPosition(savedPos.x, savedPos.y));
+      savedPos = null;
+    } else {
+      await clampToScreen();
+    }
+  } catch (err) {
+    console.error(err);
   }
 }
 // put the menu on the side with more room: window in right half → menu on left
@@ -417,6 +433,12 @@ async function init() {
 }
 
 async function openSettings() {
+  try {
+    const p = await getCurrentWindow().outerPosition();
+    savedPos = { x: p.x, y: p.y };
+  } catch {
+    savedPos = null;
+  }
   document.body.classList.remove("menu-open");
   try {
     const s = await invoke<any>("get_settings");
@@ -438,7 +460,7 @@ async function openSettings() {
 }
 async function closeSettings() {
   document.body.classList.remove("settings-open");
-  await applySize();
+  await restoreFloat();
 }
 
 // ===== chat (dialog) mode =====
@@ -471,6 +493,12 @@ function updateStreamingBot(text: string) {
   log.scrollTop = log.scrollHeight;
 }
 async function enterChat() {
+  try {
+    const p = await getCurrentWindow().outerPosition();
+    savedPos = { x: p.x, y: p.y };
+  } catch {
+    savedPos = null;
+  }
   chatMode = true;
   document.body.classList.remove("menu-open");
   document.body.classList.add("chat-mode");
@@ -500,7 +528,7 @@ async function exitChat() {
   document.body.classList.remove("chat-mode");
   streamingBot = null;
   botBuf = "";
-  await applySize();
+  await restoreFloat();
 }
 
 window.addEventListener("DOMContentLoaded", init);
