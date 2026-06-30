@@ -25,20 +25,60 @@ pub type LlmStream = Pin<Box<dyn Stream<Item = Result<String, BoxError>> + Send>
 pub enum Role {
     User,
     Assistant,
+    Tool,
+}
+
+/// A tool the LLM may call (function-calling schema).
+#[derive(Debug, Clone)]
+pub struct ToolDef {
+    pub name: String,
+    pub description: String,
+    /// JSON Schema for the arguments object.
+    pub parameters: serde_json::Value,
+}
+
+/// A tool call requested by the LLM.
+#[derive(Debug, Clone)]
+pub struct ToolCall {
+    pub id: String,
+    pub name: String,
+    pub arguments: serde_json::Value,
+}
+
+/// One non-streaming assistant turn: either final text, tool calls, or both.
+#[derive(Debug, Clone, Default)]
+pub struct ChatResponse {
+    pub content: String,
+    pub tool_calls: Vec<ToolCall>,
 }
 
 #[derive(Debug, Clone)]
 pub struct ChatMessage {
     pub role: Role,
     pub content: String,
+    /// Assistant-issued tool calls (Role::Assistant).
+    pub tool_calls: Vec<ToolCall>,
+    /// Which call this message answers (Role::Tool).
+    pub tool_call_id: Option<String>,
 }
 
 impl ChatMessage {
     pub fn user(content: impl Into<String>) -> Self {
-        Self { role: Role::User, content: content.into() }
+        Self { role: Role::User, content: content.into(), tool_calls: Vec::new(), tool_call_id: None }
     }
     pub fn assistant(content: impl Into<String>) -> Self {
-        Self { role: Role::Assistant, content: content.into() }
+        Self { role: Role::Assistant, content: content.into(), tool_calls: Vec::new(), tool_call_id: None }
+    }
+    pub fn assistant_tool_calls(tool_calls: Vec<ToolCall>) -> Self {
+        Self { role: Role::Assistant, content: String::new(), tool_calls, tool_call_id: None }
+    }
+    pub fn tool_result(call_id: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            role: Role::Tool,
+            content: content.into(),
+            tool_calls: Vec::new(),
+            tool_call_id: Some(call_id.into()),
+        }
     }
 }
 
@@ -55,6 +95,13 @@ pub struct LlmRequest {
 pub trait LlmProvider: Send + Sync {
     /// Stream the assistant reply as text deltas.
     async fn stream(&self, req: LlmRequest) -> Result<LlmStream, BoxError>;
+
+    /// Non-streaming chat with optional tools (function calling). One step of an
+    /// agent loop: the caller runs any returned tool calls and calls again.
+    /// Default: unsupported (providers override when they support tools).
+    async fn chat(&self, _req: &LlmRequest, _tools: &[ToolDef]) -> Result<ChatResponse, BoxError> {
+        Err("this LLM provider does not support tool calling".into())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

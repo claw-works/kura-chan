@@ -13,7 +13,7 @@ use futures_util::{SinkExt, StreamExt};
 use crate::config::Config;
 use crate::db::{self, Actor};
 use crate::error::AppError;
-use crate::llm::{ChatMessage, LlmRequest, Role};
+use crate::llm::{ChatMessage, LlmRequest};
 use crate::speech::{SpeechToText, TextToSpeech};
 use crate::ws::codec::{AudioFrame, AUDIO_OUTPUT, FLAG_START};
 use crate::ws::protocol::*;
@@ -280,9 +280,12 @@ async fn run_turn(
     let system_prompt = build_system_prompt(state, actor).await;
     let mut messages: Vec<ChatMessage> = history
         .into_iter()
-        .map(|m| ChatMessage {
-            role: if m.role == "assistant" { Role::Assistant } else { Role::User },
-            content: m.content,
+        .map(|m| {
+            if m.role == "assistant" {
+                ChatMessage::assistant(m.content)
+            } else {
+                ChatMessage::user(m.content)
+            }
         })
         .collect();
     messages.push(ChatMessage::user(user_message));
