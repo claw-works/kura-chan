@@ -145,7 +145,7 @@ async fn handle_socket(socket: WebSocket, device_id: String, mut actor: Actor, s
                     Ok(ClientMessage::TextInput(ti)) => {
                         let t = ti.text.trim().to_string();
                         if !t.is_empty() {
-                            run_turn(&state, &tx, &mut session, &mut actor, &device_id, &growth, session_ttl, &t).await;
+                            run_turn(&state, &tx, &mut session, &mut actor, &device_id, &growth, session_ttl, &mut receiver, &t).await;
                         }
                     }
                     Ok(ClientMessage::Hello(hello)) => {
@@ -216,7 +216,7 @@ async fn handle_socket(socket: WebSocket, device_id: String, mut actor: Actor, s
                         speak_phrase(&tx, &mut session, PHRASE_NOT_HEARD, "confused", &audio).await;
                         continue;
                     }
-                    run_turn(&state, &tx, &mut session, &mut actor, &device_id, &growth, session_ttl, &stt_text).await;
+                    run_turn(&state, &tx, &mut session, &mut actor, &device_id, &growth, session_ttl, &mut receiver, &stt_text).await;
                 }
             }
             Message::Ping(_) => {}
@@ -243,6 +243,7 @@ async fn run_turn(
     device_id: &str,
     growth: &crate::config::GrowthConfig,
     session_ttl: i64,
+    receiver: &mut futures_util::stream::SplitStream<WebSocket>,
     user_text: &str,
 ) {
     // Hold this device's lock for the whole reply turn so a scheduled job
@@ -290,21 +291,59 @@ async fn run_turn(
         })
         .collect();
     messages.push(ChatMessage::user(user_message));
-    let req = LlmRequest {
-        system_prompt,
-        messages,
-        session_id: conv_session.clone(),
-        actor_id: actor.actor_id.clone(),
-    };
-    let mut stream = match state.llm.stream(req).await {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::error!(error = ?e, "LLM invoke failed");
-            let audio = state.canned_audio(PHRASE_ERROR, crate::speech::voice_id(&actor.voice)).await;
-            speak_phrase(tx, session, PHRASE_ERROR, "sad", &audio).await;
-            return;
+    // ---- agent loop: chat (with tools) until the model stops calling tools ----
+    // Non-streaming: each step may return tool calls; device tools are sent to
+    // the client and awaited (call_device_tool), results fed back, then loop.
+    let tools = crate::ws::tools::available_tools(&session.capabilities);
+    let mut raw_reply = String::new();
+    let mut final_content = String::new();
+    {
+        let mut conv = messages;
+        let max_steps = 6usize;
+        for step in 0..max_steps {
+            let req = LlmRequest {
+                system_prompt: system_prompt.clone(),
+                messages: conv.clone(),
+                session_id: conv_session.clone(),
+                actor_id: actor.actor_id.clone(),
+            };
+            let resp = match state.llm.chat(&req, &tools).await {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::error!(error = ?e, "LLM chat failed");
+                    let audio =
+                        state.canned_audio(PHRASE_ERROR, crate::speech::voice_id(&actor.voice)).await;
+                    speak_phrase(tx, session, PHRASE_ERROR, "sad", &audio).await;
+                    return;
+                }
+            };
+            if resp.tool_calls.is_empty() {
+                final_content = resp.content;
+                break;
+            }
+            tracing::info!(count = resp.tool_calls.len(), step, "agent requested tools");
+            conv.push(ChatMessage::assistant_tool_calls(resp.tool_calls.clone()));
+            for tc in &resp.tool_calls {
+                let result = if crate::ws::tools::is_device_tool(&tc.name) {
+                    call_device_tool(receiver, tx, &tc.id, &tc.name, tc.arguments.clone(), 30).await
+                } else {
+                    Err(format!("unknown tool '{}'", tc.name))
+                };
+                let payload = match result {
+                    Ok(v) => v.to_string(),
+                    Err(e) => {
+                        tracing::warn!(tool = %tc.name, error = %e, "tool call failed");
+                        serde_json::json!({ "error": e }).to_string()
+                    }
+                };
+                conv.push(ChatMessage::tool_result(tc.id.clone(), payload));
+            }
         }
-    };
+    }
+    if final_content.trim().is_empty() {
+        final_content = "（让我再想想，待会儿聊这个吧）".to_string();
+    }
+    raw_reply.push_str(&final_content);
 
     for ev in session.transition_to_speaking(AgentResponse {
         text: String::new(),
@@ -314,50 +353,37 @@ async fn run_turn(
         send_event(tx, ev).await;
     }
 
-    let mut buf = String::new();
+    // ---- emit final reply: extract inline tags, then sentence-split for TTS ----
+    let mut buf = final_content;
     let mut new_tasks: Vec<crate::tasks::ScheduledTask> = Vec::new();
     let mut cancel_jobs: Vec<String> = Vec::new();
     let mut appearance_ops: Vec<(String, serde_json::Value)> = Vec::new();
     let mut turn_growth = TurnGrowth::default();
     let mut reply_text = String::new();
-    let mut raw_reply = String::new();
     let mut want_new_session = false;
     let mut first = true;
     let mut sent_any = false;
-    loop {
-        match stream.next().await {
-            Some(Ok(t)) => {
-                raw_reply.push_str(&t);
-                buf.push_str(&t);
-                for msg in extract_tags(&mut buf, device_id, &mut new_tasks, &mut want_new_session, &mut appearance_ops, &mut turn_growth, &mut cancel_jobs) {
-                    send_event(tx, SessionEvent::SendJson(msg)).await;
-                }
-                while let Some(cut) = {
-                    let safe = buf.find('[').unwrap_or(buf.len());
-                    split_sentence(&buf[..safe])
-                } {
-                    let seg: String = buf.drain(..cut).collect();
-                    let seg = seg.trim();
-                    if !seg.is_empty() && !seg.contains("[NOISE]") {
-                        reply_text.push_str(seg);
-                        send_event(tx, SessionEvent::SendJson(ServerMessage::Subtitle(Subtitle {
-                            text: seg.to_string(),
-                            r#final: false,
-                        }))).await;
-                        let audio = state.tts.synthesize(seg, crate::speech::voice_id(&actor.voice)).await.unwrap_or_default();
-                        if !audio.is_empty() {
-                            send_audio_stream(tx, &audio, first).await;
-                            first = false;
-                            sent_any = true;
-                        }
-                    }
-                }
+    for msg in extract_tags(&mut buf, device_id, &mut new_tasks, &mut want_new_session, &mut appearance_ops, &mut turn_growth, &mut cancel_jobs) {
+        send_event(tx, SessionEvent::SendJson(msg)).await;
+    }
+    while let Some(cut) = {
+        let safe = buf.find('[').unwrap_or(buf.len());
+        split_sentence(&buf[..safe])
+    } {
+        let seg: String = buf.drain(..cut).collect();
+        let seg = seg.trim();
+        if !seg.is_empty() && !seg.contains("[NOISE]") {
+            reply_text.push_str(seg);
+            send_event(tx, SessionEvent::SendJson(ServerMessage::Subtitle(Subtitle {
+                text: seg.to_string(),
+                r#final: false,
+            }))).await;
+            let audio = state.tts.synthesize(seg, crate::speech::voice_id(&actor.voice)).await.unwrap_or_default();
+            if !audio.is_empty() {
+                send_audio_stream(tx, &audio, first).await;
+                first = false;
+                sent_any = true;
             }
-            Some(Err(e)) => {
-                tracing::error!(error = %e, "LLM stream error");
-                break;
-            }
-            None => break,
         }
     }
     for msg in extract_tags(&mut buf, device_id, &mut new_tasks, &mut want_new_session, &mut appearance_ops, &mut turn_growth, &mut cancel_jobs) {
@@ -690,7 +716,6 @@ async fn speak_phrase(
 /// nested-reading `receiver`. Single-task model: during the wait, unrelated
 /// inbound messages are dropped (a turn shouldn't have concurrent input).
 /// Returns the tool result JSON, or an error (timeout / disconnect / tool fail).
-#[allow(dead_code)]
 async fn call_device_tool(
     receiver: &mut futures_util::stream::SplitStream<WebSocket>,
     tx: &crate::registry::DeviceTx,
