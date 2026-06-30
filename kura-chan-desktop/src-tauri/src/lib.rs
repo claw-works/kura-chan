@@ -121,8 +121,50 @@ fn stop_recording(recorder: State<Recorder>, ws: State<WsHandle>) {
     audio::send_pcm(&ws.tx, &pcm);
 }
 
-/// Read a dropped file as UTF-8 text (small files only). Used by drag-and-drop:
-/// the frontend reads the file then sends its content into the conversation.
+/// Fetch conversation history from the server (Bearer api_key), cache it to
+/// ~/.kura/history.json, and return it. Falls back to the cache when offline.
+#[tauri::command]
+async fn get_history() -> Result<serde_json::Value, String> {
+    let s = load_settings();
+    let cache = kura_dir().map(|d| d.join("history.json"));
+    let url = format!("{}/history", s.http_base.trim_end_matches('/'));
+    let fetched: Result<serde_json::Value, String> = async {
+        let resp = reqwest::Client::new()
+            .get(&url)
+            .bearer_auth(&s.api_key)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        if !resp.status().is_success() {
+            return Err(format!("HTTP {}", resp.status()));
+        }
+        resp.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+    }
+    .await;
+
+    match fetched {
+        Ok(json) => {
+            if let Some(p) = &cache {
+                if let Some(parent) = p.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let _ = std::fs::write(p, serde_json::to_string(&json).unwrap_or_default());
+            }
+            Ok(json)
+        }
+        Err(e) => {
+            // offline: fall back to the cached copy if present
+            if let Some(p) = &cache {
+                if let Ok(c) = std::fs::read_to_string(p) {
+                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&c) {
+                        return Ok(json);
+                    }
+                }
+            }
+            Err(e)
+        }
+    }
+}
 #[tauri::command]
 fn read_dropped(path: String) -> Result<String, String> {
     let meta = std::fs::metadata(&path).map_err(|e| e.to_string())?;
@@ -170,7 +212,8 @@ pub fn run() {
             stop_recording,
             read_dropped,
             get_settings,
-            save_settings
+            save_settings,
+            get_history
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

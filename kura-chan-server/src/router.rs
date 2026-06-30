@@ -26,6 +26,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/register", axum::routing::post(api::register))
         .route("/me", axum::routing::put(api::update_me))
         .route("/session/reset", axum::routing::post(api::reset_session))
+        .route("/history", get(api::get_history))
         .route("/assets/{gender}", get(crate::assets::list_assets))
         .route("/assets/composite/{gender}", get(crate::assets::get_composite))
         .route("/assets/composite_png/{gender}", get(crate::assets::get_composite_png))

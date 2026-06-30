@@ -302,6 +302,21 @@ pub async fn get_recent_messages(
     rows
 }
 
+/// All of an actor's messages (oldest→newest), capped at `limit` — for the
+/// desktop chat-history view (server-authoritative, multi-device consistent).
+pub async fn get_history(db: &Db, actor_id: &str, limit: i64) -> Vec<MessageRow> {
+    let mut rows = sqlx::query_as::<_, MessageRow>(
+        "SELECT role, content FROM messages WHERE actor_id=$1 ORDER BY id DESC LIMIT $2",
+    )
+    .bind(actor_id)
+    .bind(limit)
+    .fetch_all(db)
+    .await
+    .unwrap_or_default();
+    rows.reverse();
+    rows
+}
+
 // ---- growth-driven content: prompt templates / fragments / catalog ----
 
 #[derive(Debug, Clone, sqlx::FromRow)]

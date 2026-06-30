@@ -170,3 +170,21 @@ pub async fn delete_workflow(
         StatusCode::NOT_FOUND
     }
 }
+
+
+/// GET /history (Bearer api_key) — recent conversation messages for the actor,
+/// oldest→newest. Content keeps inline tags as stored; clients strip for display.
+pub async fn get_history(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let actor = crate::auth::authenticate(&headers, &state.db)
+        .await
+        .map_err(|e| (StatusCode::UNAUTHORIZED, e))?;
+    let msgs = crate::db::get_history(&state.db, &actor.actor_id, 100).await;
+    let messages: Vec<serde_json::Value> = msgs
+        .into_iter()
+        .map(|m| serde_json::json!({ "role": m.role, "content": m.content }))
+        .collect();
+    Ok(Json(serde_json::json!({ "messages": messages })))
+}
