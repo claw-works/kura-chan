@@ -104,7 +104,7 @@ async fn run_conn(
             "output_sample_rate": 16000,
             "output_channels": 1
         },
-        "capabilities": ["text", "notify", "read_file", "list_dir"]
+        "capabilities": ["text", "notify", "read_file", "list_dir", "search_files", "get_clipboard", "set_clipboard", "system_info", "write_file", "open_url", "open_path", "run_command"]
     });
     write
         .send(Message::Text(hello.to_string().into()))
@@ -243,32 +243,25 @@ fn expand_path(p: &str) -> String {
 }
 
 async fn run_tool(tool: &str, params: &serde_json::Value) -> (&'static str, serde_json::Value) {
+    let p = |k: &str| params.get(k).and_then(|v| v.as_str()).unwrap_or("");
     match tool {
         "notify" => {
-            let title = params.get("title").and_then(|v| v.as_str()).unwrap_or("小爪");
-            let body = params.get("body").and_then(|v| v.as_str()).unwrap_or("");
-            notify_macos(title, body);
+            let title = if p("title").is_empty() { "小爪" } else { p("title") };
+            notify_macos(title, p("body"));
             ("ok", json!({ "shown": true }))
         }
         "read_file" => {
-            // NOTE: reads an arbitrary path the user's agent chose. Trusted for
-            // now (user's own machine); add a path allowlist / confirmation later.
-            let path = expand_path(params.get("path").and_then(|v| v.as_str()).unwrap_or(""));
+            // NOTE: reads an arbitrary path the agent chose. Trusted for now
+            // (user's own machine); add a path allowlist / confirmation later.
+            let path = expand_path(p("path"));
             match tokio::fs::read_to_string(&path).await {
-                Ok(c) => {
-                    let clipped: String = c.chars().take(4000).collect();
-                    ("ok", json!({ "content": clipped }))
-                }
+                Ok(c) => ("ok", json!({ "content": c.chars().take(4000).collect::<String>() })),
                 Err(e) => ("error", json!(e.to_string())),
             }
         }
         "list_dir" => {
-            let path = expand_path(params.get("path").and_then(|v| v.as_str()).unwrap_or(""));
-            let filter = params
-                .get("filter")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_lowercase();
+            let path = expand_path(p("path"));
+            let filter = p("filter").to_lowercase();
             match tokio::fs::read_dir(&path).await {
                 Ok(mut rd) => {
                     let mut entries: Vec<String> = Vec::new();
@@ -285,7 +278,114 @@ async fn run_tool(tool: &str, params: &serde_json::Value) -> (&'static str, serd
                 Err(e) => ("error", json!(e.to_string())),
             }
         }
+        "search_files" => {
+            let dir = expand_path(if p("dir").is_empty() { "~" } else { p("dir") });
+            let pattern = p("pattern");
+            match tokio::process::Command::new("find")
+                .arg(&dir)
+                .args(["-maxdepth", "4", "-iname", &format!("*{pattern}*")])
+                .output()
+                .await
+            {
+                Ok(o) => {
+                    let files: Vec<String> =
+                        String::from_utf8_lossy(&o.stdout).lines().take(100).map(String::from).collect();
+                    ("ok", json!({ "count": files.len(), "files": files }))
+                }
+                Err(e) => ("error", json!(e.to_string())),
+            }
+        }
+        "get_clipboard" => match tokio::process::Command::new("pbpaste").output().await {
+            Ok(o) => ("ok", json!({ "text": String::from_utf8_lossy(&o.stdout).chars().take(4000).collect::<String>() })),
+            Err(e) => ("error", json!(e.to_string())),
+        },
+        "set_clipboard" => match set_clipboard(p("text")).await {
+            Ok(()) => ("ok", json!({ "set": true })),
+            Err(e) => ("error", json!(e)),
+        },
+        "system_info" => {
+            let battery = tokio::process::Command::new("pmset")
+                .args(["-g", "batt"])
+                .output()
+                .await
+                .ok()
+                .map(|o| {
+                    String::from_utf8_lossy(&o.stdout).lines().nth(1).unwrap_or("").trim().to_string()
+                });
+            (
+                "ok",
+                json!({
+                    "os": std::env::consts::OS,
+                    "user": std::env::var("USER").unwrap_or_default(),
+                    "home": std::env::var("HOME").unwrap_or_default(),
+                    "battery": battery,
+                }),
+            )
+        }
+        "write_file" => {
+            let path = expand_path(p("path"));
+            match tokio::fs::write(&path, p("content")).await {
+                Ok(()) => ("ok", json!({ "written": true, "path": path })),
+                Err(e) => ("error", json!(e.to_string())),
+            }
+        }
+        "open_url" => match tokio::process::Command::new("open").arg(p("url")).output().await {
+            Ok(_) => ("ok", json!({ "opened": true })),
+            Err(e) => ("error", json!(e.to_string())),
+        },
+        "open_path" => {
+            let path = expand_path(p("path"));
+            match tokio::process::Command::new("open").arg(&path).output().await {
+                Ok(_) => ("ok", json!({ "opened": true })),
+                Err(e) => ("error", json!(e.to_string())),
+            }
+        }
+        "run_command" => {
+            let cmd = p("command").to_string();
+            if !osascript_confirm(&format!("小爪想执行命令：\n\n{cmd}\n\n允许吗？")).await {
+                return ("error", json!("用户拒绝执行该命令"));
+            }
+            match tokio::process::Command::new("sh").arg("-c").arg(&cmd).output().await {
+                Ok(o) => (
+                    "ok",
+                    json!({
+                        "stdout": String::from_utf8_lossy(&o.stdout).chars().take(4000).collect::<String>(),
+                        "stderr": String::from_utf8_lossy(&o.stderr).chars().take(1000).collect::<String>(),
+                        "code": o.status.code(),
+                    }),
+                ),
+                Err(e) => ("error", json!(e.to_string())),
+            }
+        }
         _ => ("error", json!(format!("unknown tool '{tool}'"))),
+    }
+}
+
+/// Write text to the macOS clipboard via pbcopy.
+async fn set_clipboard(text: &str) -> Result<(), String> {
+    use tokio::io::AsyncWriteExt;
+    let mut child = tokio::process::Command::new("pbcopy")
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    if let Some(mut si) = child.stdin.take() {
+        si.write_all(text.as_bytes()).await.map_err(|e| e.to_string())?;
+        let _ = si.shutdown().await;
+    }
+    child.wait().await.map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Ask the user to confirm a risky action via a native macOS dialog.
+async fn osascript_confirm(prompt: &str) -> bool {
+    let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+    let script = format!(
+        "display dialog \"{}\" buttons {{\"拒绝\", \"允许\"}} default button \"拒绝\" with title \"小爪\"",
+        esc(prompt)
+    );
+    match tokio::process::Command::new("osascript").arg("-e").arg(script).output().await {
+        Ok(o) => String::from_utf8_lossy(&o.stdout).contains("允许"),
+        Err(_) => false,
     }
 }
 
