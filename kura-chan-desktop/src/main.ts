@@ -22,7 +22,6 @@ const MENU_H = 40; // menu row
 const FORM_H = 48; // text input row (when open)
 let sizeIdx = 1;
 let expanded = false;
-let curWinW = 0; // tracked current window logical width
 let curCH = 0; // tracked current control height (0 when collapsed)
 let curMode: "collapsed" | "down" | "up" = "collapsed";
 let textOpen = false;
@@ -45,11 +44,11 @@ async function applyWindow(expand: boolean) {
     const sf = await win.scaleFactor();
     const lx = pos.x / sf;
     const ly = pos.y / sf;
-    // pet is horizontally centered; reconstruct its fixed screen center/top
-    const petCenterX = lx + (curWinW || newW) / 2;
-    const petTop = curMode === "up" ? ly + curCH : ly;
+    // pet is LEFT-anchored; reconstruct its fixed screen top-left from mode
+    const petX = lx;
+    const petY = curMode === "up" ? ly + curCH : ly;
 
-    // edge detection: open controls above the pet if no room below
+    // edge detection: open controls above the pet if there's no room below
     let ctrlTop = false;
     if (expand && ch > 0) {
       try {
@@ -57,33 +56,31 @@ async function applyWindow(expand: boolean) {
         if (mon) {
           const msf = mon.scaleFactor || sf;
           const screenBottom = (mon.position.y + mon.size.height) / msf;
-          ctrlTop = petTop + ph + ch + 8 > screenBottom;
+          ctrlTop = petY + ph + ch + 8 > screenBottom;
         }
       } catch {
         /* default downward */
       }
     }
 
-    const winX = petCenterX - newW / 2;
-    const winY = ctrlTop ? petTop - ch : petTop;
+    const winX = petX;
+    const winY = ctrlTop ? petY - ch : petY;
 
-    // Hide content while we resize+move, then reveal after layout settles —
-    // the geometry jump happens invisibly so the menu never appears to jump.
-    document.body.classList.add("settling");
     document.documentElement.style.setProperty("--pet-h", ph + "px");
     document.documentElement.style.setProperty("--ctrl-h", ch + "px");
     document.body.classList.toggle("ctrl-top", ctrlTop);
+
     await win.setSize(new LogicalSize(newW, newH));
-    await win.setPosition(new LogicalPosition(Math.round(winX), Math.round(winY)));
-    curWinW = newW;
+    // only move when top-left actually changes (opening upward); the common
+    // down-expand keeps the same top-left → no setPosition → no flicker.
+    if (Math.round(winX) !== Math.round(lx) || Math.round(winY) !== Math.round(ly)) {
+      await win.setPosition(new LogicalPosition(Math.round(winX), Math.round(winY)));
+    }
+
     curCH = ch;
     curMode = !expand ? "collapsed" : ctrlTop ? "up" : "down";
     expanded = expand;
-    requestAnimationFrame(() =>
-      requestAnimationFrame(() => document.body.classList.remove("settling")),
-    );
   } catch (err) {
-    document.body.classList.remove("settling");
     console.error("applyWindow failed", err);
   }
 }
@@ -319,28 +316,39 @@ async function init() {
     }
   });
 
-  // pointer hover via global cursor polling (works even when window isn't focused).
-  // expand immediately; debounce collapse to absorb edge flicker + resize races.
-  let collapseTimer: number | undefined;
-  await listen<boolean>("hover", (e) => {
-    if (e.payload) {
-      if (collapseTimer) {
-        clearTimeout(collapseTimer);
-        collapseTimer = undefined;
+  // Click the pet to toggle the menu; drag the pet (mousedown + move) to move it.
+  const stage = el("#stage");
+  let dragStartX = 0;
+  let dragStartY = 0;
+  let didDrag = false;
+  stage.addEventListener("mousedown", (e) => {
+    const me = e as MouseEvent;
+    if (me.button !== 0) return;
+    dragStartX = me.screenX;
+    dragStartY = me.screenY;
+    didDrag = false;
+  });
+  stage.addEventListener("mousemove", (e) => {
+    const me = e as MouseEvent;
+    if (me.buttons !== 1) return;
+    if (!didDrag && (Math.abs(me.screenX - dragStartX) > 4 || Math.abs(me.screenY - dragStartY) > 4)) {
+      didDrag = true;
+      void getCurrentWindow().startDragging();
+    }
+  });
+  stage.addEventListener("click", () => {
+    if (didDrag) {
+      didDrag = false;
+      return; // it was a drag, not a click
+    }
+    if (expanded) {
+      if (textOpen) {
+        textOpen = false;
+        form.classList.add("hidden");
       }
-      if (!expanded) void applyWindow(true);
+      void applyWindow(false);
     } else {
-      if (collapseTimer) clearTimeout(collapseTimer);
-      collapseTimer = window.setTimeout(() => {
-        collapseTimer = undefined;
-        const input = el("#chat-input") as HTMLInputElement;
-        if (document.activeElement === input || recording) return;
-        if (textOpen) {
-          textOpen = false;
-          form.classList.add("hidden");
-        }
-        if (expanded) void applyWindow(false);
-      }, 500);
+      void applyWindow(true);
     }
   });
 

@@ -34,12 +34,8 @@ body {
   height: var(--pet-h, 200px);
   display: flex;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
   animation: breathe 4s ease-in-out infinite;
-}
-/* hidden while window geometry settles, to avoid a visible jump on expand */
-body.settling #app {
-  visibility: hidden;
 }
 /* edge detection: when controls open ABOVE the pet (near screen bottom) */
 body.ctrl-top #stage {
@@ -88,8 +84,7 @@ body.ctrl-top #stage {
 .bubble {
   position: absolute;
   bottom: calc(var(--ctrl-h, 0px) + 10px);
-  left: 50%;
-  transform: translateX(-50%);
+  left: 8px;
   max-width: 92%;  background: rgba(20, 20, 24, 0.8);
   border-radius: 12px;
   padding: 6px 12px;
@@ -134,7 +129,7 @@ body.ctrl-top #controls {
 #menu {
   display: flex;
   gap: 4px;
-  justify-content: center;
+  justify-content: flex-start;
   align-items: center;
   flex-wrap: nowrap;
 }
