@@ -397,13 +397,25 @@ async function init() {
     void invoke("send_text", { text });
   }
   el("#chat-send").addEventListener("click", sendChat);
+  // IME-safe Enter: macOS WKWebView's isComposing alone isn't reliable, so also
+  // track composition state + the moment a candidate was just confirmed.
+  let composing = false;
+  let lastCompositionEnd = 0;
+  chatInput.addEventListener("compositionstart", () => {
+    composing = true;
+  });
+  chatInput.addEventListener("compositionend", () => {
+    composing = false;
+    lastCompositionEnd = Date.now();
+  });
   chatInput.addEventListener("keydown", (e) => {
     const ke = e as KeyboardEvent;
-    // ignore Enter while IME is composing (e.g. selecting Chinese candidates)
-    if (ke.key === "Enter" && !ke.isComposing) {
-      e.preventDefault();
-      sendChat();
+    if (ke.key !== "Enter") return;
+    if (composing || ke.isComposing || ke.keyCode === 229 || Date.now() - lastCompositionEnd < 120) {
+      return; // IME candidate confirmation, not a real send
     }
+    e.preventDefault();
+    sendChat();
   });
   el("#chat-exit").addEventListener("click", () => void exitChat());
   el("#tts-btn").addEventListener("click", () => {
