@@ -1,6 +1,7 @@
 pub mod codec;
 pub mod protocol;
 pub mod session;
+pub mod tools;
 
 use std::sync::Arc;
 
@@ -682,6 +683,56 @@ async fn speak_phrase(
     send_event(tx, SessionEvent::SendJson(ServerMessage::SpeakDone)).await;
     for ev in session.finish_speaking() {
         send_event(tx, ev).await;
+    }
+}
+
+/// Send a `ToolCall` to the device and wait for the matching `ToolResult` by
+/// nested-reading `receiver`. Single-task model: during the wait, unrelated
+/// inbound messages are dropped (a turn shouldn't have concurrent input).
+/// Returns the tool result JSON, or an error (timeout / disconnect / tool fail).
+#[allow(dead_code)]
+async fn call_device_tool(
+    receiver: &mut futures_util::stream::SplitStream<WebSocket>,
+    tx: &crate::registry::DeviceTx,
+    call_id: &str,
+    tool: &str,
+    params: serde_json::Value,
+    timeout_secs: u64,
+) -> Result<serde_json::Value, String> {
+    send_event(
+        tx,
+        SessionEvent::SendJson(ServerMessage::ToolCall(ToolCall {
+            call_id: call_id.to_string(),
+            tool: tool.to_string(),
+            params,
+        })),
+    )
+    .await;
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Err("device tool timed out".into());
+        }
+        let msg = match tokio::time::timeout(remaining, receiver.next()).await {
+            Ok(Some(Ok(m))) => m,
+            Ok(Some(Err(e))) => return Err(format!("device read error: {e}")),
+            Ok(None) => return Err("device disconnected".into()),
+            Err(_) => return Err("device tool timed out".into()),
+        };
+        if let Message::Text(text) = msg {
+            if let Ok(ClientMessage::ToolResult(r)) = serde_json::from_str::<ClientMessage>(&text) {
+                if r.call_id == call_id {
+                    if r.status == "ok" {
+                        return Ok(r.result);
+                    }
+                    return Err(format!("device tool failed: {}", r.result));
+                }
+            }
+            // unrelated text during a tool wait — drop (single-task model)
+        }
+        // binary/ping frames during a wait are ignored
     }
 }
 

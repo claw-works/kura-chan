@@ -22,6 +22,8 @@ pub struct Session {
     pub battery: Option<i32>,
     pub charging: Option<bool>,
     pub volume: Option<i32>,
+    /// Tools this device can execute locally (from Hello), e.g. ["notify","read_file"].
+    pub capabilities: Vec<String>,
 }
 
 pub enum SessionEvent {
@@ -40,11 +42,13 @@ impl Session {
             battery: None,
             charging: None,
             volume: None,
+            capabilities: Vec::new(),
         }
     }
 
     pub fn handle_hello(&mut self, hello: ClientHello) -> Vec<SessionEvent> {
-        tracing::info!(device_id = %hello.device_id, "Device connected");
+        tracing::info!(device_id = %hello.device_id, capabilities = ?hello.capabilities, "Device connected");
+        self.capabilities = hello.capabilities;
         vec![SessionEvent::SendJson(ServerMessage::Hello(ServerHello {
             session_id: self.session_id.clone(),
             audio: ServerAudioConfig {
