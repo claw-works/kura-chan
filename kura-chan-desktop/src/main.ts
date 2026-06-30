@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { getCurrentWindow, LogicalSize, LogicalPosition, currentMonitor } from "@tauri-apps/api/window";
+import { getCurrentWindow, LogicalSize, currentMonitor } from "@tauri-apps/api/window";
 
 let httpBase = "http://127.0.0.1:18099";
 let gender = "girl";
@@ -13,75 +13,49 @@ let currentExpr = "neutral";
 let speaking = false;
 let talkTimer: number | undefined;
 
-// window / layout state — only the CHARACTER scales; controls are fixed-size and
-// the window expands on hover WITHOUT moving the character (position compensated).
-const PET_SIZES = [96, 180, 300]; // 小 / 中 / 大 (character height)
+// layout: window = pet + a narrow vertical menu strip beside it.
+const PET_SIZES = [96, 160, 260]; // 小 / 中 / 大 (cycled by one button)
 const PET_RATIO = 0.83;
-const CTRL_W = 260; // fixed control width when expanded
-const MENU_H = 40; // menu row
-const FORM_H = 48; // text input row (when open)
+const MENU_W = 44; // vertical menu strip width
+const MENU_MIN_H = 170; // min height to fit the vertical menu
+const FORM_H = 42; // text input row height (when open)
 let sizeIdx = 1;
-let expanded = false;
-let curCH = 0; // tracked current control height (0 when collapsed)
-let curMode: "collapsed" | "down" | "up" = "collapsed";
 let textOpen = false;
 
-function petDims(): [number, number] {
-  const h = PET_SIZES[sizeIdx];
-  return [Math.max(72, Math.round(h * PET_RATIO)), h];
+function applyDims(): { pw: number; ph: number } {
+  const ph = PET_SIZES[sizeIdx];
+  const pw = Math.round(ph * PET_RATIO);
+  document.documentElement.style.setProperty("--pet-h", ph + "px");
+  document.documentElement.style.setProperty("--pet-w", pw + "px");
+  return { pw, ph };
 }
-function ctrlH(): number {
-  return textOpen ? MENU_H + FORM_H : MENU_H;
-}
-async function applyWindow(expand: boolean) {
-  const win = getCurrentWindow();
-  const [pw, ph] = petDims();
-  const ch = expand ? ctrlH() : 0;
-  const newW = expand ? Math.max(pw, CTRL_W) : pw;
-  const newH = ph + ch;
+async function applySize() {
+  const { pw, ph } = applyDims();
+  const winW = pw + MENU_W;
+  const winH = Math.max(ph, MENU_MIN_H) + (textOpen ? FORM_H : 0);
   try {
-    const pos = await win.outerPosition();
-    const sf = await win.scaleFactor();
-    const lx = pos.x / sf;
-    const ly = pos.y / sf;
-    // pet is LEFT-anchored; reconstruct its fixed screen top-left from mode
-    const petX = lx;
-    const petY = curMode === "up" ? ly + curCH : ly;
-
-    // edge detection: open controls above the pet if there's no room below
-    let ctrlTop = false;
-    if (expand && ch > 0) {
-      try {
-        const mon = await currentMonitor();
-        if (mon) {
-          const msf = mon.scaleFactor || sf;
-          const screenBottom = (mon.position.y + mon.size.height) / msf;
-          ctrlTop = petY + ph + ch + 8 > screenBottom;
-        }
-      } catch {
-        /* default downward */
-      }
-    }
-
-    const winX = petX;
-    const winY = ctrlTop ? petY - ch : petY;
-
-    document.documentElement.style.setProperty("--pet-h", ph + "px");
-    document.documentElement.style.setProperty("--ctrl-h", ch + "px");
-    document.body.classList.toggle("ctrl-top", ctrlTop);
-
-    await win.setSize(new LogicalSize(newW, newH));
-    // only move when top-left actually changes (opening upward); the common
-    // down-expand keeps the same top-left → no setPosition → no flicker.
-    if (Math.round(winX) !== Math.round(lx) || Math.round(winY) !== Math.round(ly)) {
-      await win.setPosition(new LogicalPosition(Math.round(winX), Math.round(winY)));
-    }
-
-    curCH = ch;
-    curMode = !expand ? "collapsed" : ctrlTop ? "up" : "down";
-    expanded = expand;
+    await getCurrentWindow().setSize(new LogicalSize(winW, winH));
   } catch (err) {
-    console.error("applyWindow failed", err);
+    console.error("setSize failed", err);
+  }
+}
+// put the menu on the side with more room: window in right half → menu on left
+async function updateSide() {
+  try {
+    const win = getCurrentWindow();
+    const [pos, size, sf, mon] = await Promise.all([
+      win.outerPosition(),
+      win.outerSize(),
+      win.scaleFactor(),
+      currentMonitor(),
+    ]);
+    if (!mon) return;
+    const msf = mon.scaleFactor || sf;
+    const winCenterX = (pos.x + size.width / 2) / msf;
+    const screenCenterX = (mon.position.x + mon.size.width / 2) / msf;
+    document.body.classList.toggle("menu-left", winCenterX > screenCenterX);
+  } catch {
+    /* ignore */
   }
 }
 
@@ -123,7 +97,7 @@ function setStatus(s: string) {
   dot.classList.toggle("connected", s === "connected");
   dot.setAttribute("title", label(s));
 }
-const SUBTITLE_MS = 5000; // auto-hide subtitle after N ms (will be configurable)
+const SUBTITLE_MS = 5000;
 let bubbleTimer: number | undefined;
 function setBubble(s: string) {
   const b = el("#bubble");
@@ -265,11 +239,11 @@ async function init() {
   await listen<string>("audio", (e) => playPcmChunk(e.payload as string));
   await listen("speak_done", () => {
     speaking = false;
-    currentExpr = "neutral"; // reset to neutral so blinking resumes after talking
+    currentExpr = "neutral";
     stopTalk();
   });
 
-  // drag-and-drop: drop a text file onto the pet → read it and send as a message
+  // drag-and-drop: drop a text file onto the pet → read & send
   await getCurrentWindow().onDragDropEvent(async (ev) => {
     const pl = ev.payload as any;
     if (pl?.type !== "drop" || !Array.isArray(pl.paths)) return;
@@ -289,6 +263,13 @@ async function init() {
     }
   });
 
+  // re-evaluate menu side when the window is moved (debounced)
+  let moveTimer: number | undefined;
+  await getCurrentWindow().onMoved(() => {
+    if (moveTimer) clearTimeout(moveTimer);
+    moveTimer = window.setTimeout(() => void updateSide(), 250);
+  });
+
   try {
     const cfg = await invoke<{ httpBase: string; status: string }>("get_config");
     if (cfg?.httpBase) httpBase = cfg.httpBase;
@@ -298,6 +279,27 @@ async function init() {
   }
   loadPortrait();
   scheduleBlink();
+  await applySize();
+  await updateSide();
+
+  // drag the pet to move the window; a plain click just focuses it (so the
+  // OS lets the focused window receive hover events for the menu).
+  const stage = el("#stage");
+  let dragStartX = 0;
+  let dragStartY = 0;
+  stage.addEventListener("mousedown", (e) => {
+    const me = e as MouseEvent;
+    if (me.button !== 0) return;
+    dragStartX = me.screenX;
+    dragStartY = me.screenY;
+  });
+  stage.addEventListener("mousemove", (e) => {
+    const me = e as MouseEvent;
+    if (me.buttons !== 1) return;
+    if (Math.abs(me.screenX - dragStartX) > 4 || Math.abs(me.screenY - dragStartY) > 4) {
+      void getCurrentWindow().startDragging();
+    }
+  });
 
   // text input form
   const form = el("#chat-form") as HTMLFormElement;
@@ -317,64 +319,24 @@ async function init() {
     }
   });
 
-  // Click the pet to toggle the menu; drag the pet (mousedown + move) to move it.
-  const stage = el("#stage");
-  let dragStartX = 0;
-  let dragStartY = 0;
-  let didDrag = false;
-  stage.addEventListener("mousedown", (e) => {
-    const me = e as MouseEvent;
-    if (me.button !== 0) return;
-    dragStartX = me.screenX;
-    dragStartY = me.screenY;
-    didDrag = false;
-  });
-  stage.addEventListener("mousemove", (e) => {
-    const me = e as MouseEvent;
-    if (me.buttons !== 1) return;
-    if (!didDrag && (Math.abs(me.screenX - dragStartX) > 4 || Math.abs(me.screenY - dragStartY) > 4)) {
-      didDrag = true;
-      void getCurrentWindow().startDragging();
-    }
-  });
-  stage.addEventListener("click", () => {
-    if (didDrag) {
-      didDrag = false;
-      return; // it was a drag, not a click
-    }
-    if (expanded) {
-      if (textOpen) {
-        textOpen = false;
-        form.classList.add("hidden");
-      }
-      void applyWindow(false);
-    } else {
-      void applyWindow(true);
-    }
-  });
-
-  // menu: voice / text / sizes / settings / close
+  // menu buttons
   el("#voice-btn").addEventListener("click", () => {
     if (!recording) void startVoice();
     else void stopVoice();
   });
-  el("#text-btn").addEventListener("click", () => {
+  el("#text-btn").addEventListener("click", async () => {
     textOpen = !textOpen;
     form.classList.toggle("hidden", !textOpen);
-    void applyWindow(true);
+    await applySize();
     if (textOpen) (el("#chat-input") as HTMLInputElement).focus();
   });
-  document.querySelectorAll(".size-btn").forEach((b) =>
-    b.addEventListener("click", () => {
-      sizeIdx = Number((b as HTMLElement).dataset.size);
-      void applyWindow(expanded);
-    })
-  );
+  el("#size-btn").addEventListener("click", () => {
+    sizeIdx = (sizeIdx + 1) % PET_SIZES.length;
+    void applySize();
+  });
   el("#settings-btn").addEventListener("click", () => {
     setBubble("设置面板开发中…（下个版本）");
   });
-
-  await applyWindow(false);
 }
 
 window.addEventListener("DOMContentLoaded", init);

@@ -14,21 +14,17 @@
         <img id="face" class="face" alt="" draggable="false" />
       </div>
       <div id="bubble" class="bubble"></div>
-      <div id="controls">
-        <div id="menu">
-          <span id="dot" class="dot" title="连接状态"></span>
-          <button type="button" id="voice-btn" title="语音对话">🎤</button>
-          <button type="button" id="text-btn" title="文字输入">💬</button>
-          <button type="button" class="size-btn" data-size="0" title="小">小</button>
-          <button type="button" class="size-btn" data-size="1" title="中">中</button>
-          <button type="button" class="size-btn" data-size="2" title="大">大</button>
-          <button type="button" id="settings-btn" title="设置">⚙</button>
-        </div>
-        <form id="chat-form" class="chat hidden">
-          <input id="chat-input" placeholder="跟小爪说点什么…" autocomplete="off" />
-          <button type="submit">发送</button>
-        </form>
+      <div id="menu">
+        <span id="dot" class="dot" title="连接状态"></span>
+        <button type="button" id="voice-btn" title="语音">🎤</button>
+        <button type="button" id="text-btn" title="文字">💬</button>
+        <button type="button" id="size-btn" title="大小">⊙</button>
+        <button type="button" id="settings-btn" title="设置">⚙</button>
       </div>
+      <form id="chat-form" class="chat hidden">
+        <input id="chat-input" placeholder="说点什么…" autocomplete="off" />
+        <button type="submit">发送</button>
+      </form>
     </div>
   </body>
 </html>

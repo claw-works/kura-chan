@@ -17,30 +17,31 @@ body {
   user-select: none;
 }
 
+/* pet on one side, vertical menu beside it. menu-left flips the order. */
 #app {
   position: relative;
   width: 100vw;
   height: 100vh;
   background: transparent;
   overflow: hidden;
-}
-
-/* character: fills the window, only vertical breathing (no scale) */
-#stage {
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: var(--pet-h, 200px);
   display: flex;
   align-items: center;
   justify-content: flex-start;
-  animation: breathe 4s ease-in-out infinite;
 }
-/* edge detection: when controls open ABOVE the pet (near screen bottom) */
-body.ctrl-top #stage {
-  top: auto;
-  bottom: 0;
+body.menu-left #app {
+  justify-content: flex-end;
+  flex-direction: row-reverse;
+}
+
+#stage {
+  flex: 0 0 auto;
+  width: var(--pet-w, 150px);
+  height: var(--pet-h, 180px);
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: breathe 4s ease-in-out infinite;
 }
 .portrait,
 .face {
@@ -66,101 +67,34 @@ body.ctrl-top #stage {
   }
 }
 
-/* status / bubble / controls only appear on hover (bubble also when it has text) */
-.status {
-  position: fixed;
-  top: 5px;
-  left: 8px;
-  font-size: 11px;
-  color: rgba(255, 255, 255, 0.7);
-  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
-  opacity: 0;
-  transition: opacity 0.2s;
-}
-#app:hover .status {
-  opacity: 1;
-}
-
-.bubble {
-  position: absolute;
-  bottom: calc(var(--ctrl-h, 0px) + 10px);
-  left: 8px;
-  max-width: 92%;  background: rgba(20, 20, 24, 0.8);
-  border-radius: 12px;
-  padding: 6px 12px;
-  font-size: 14px;
-  line-height: 1.45;
-  text-align: center;
-  backdrop-filter: blur(6px);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
-  opacity: 0;
-  transition: opacity 0.2s;
-  pointer-events: none;
-}
-.bubble.show {
-  opacity: 1;
-}
-body.ctrl-top .bubble {
-  bottom: auto;
-  top: calc(var(--ctrl-h, 0px) + 10px);
-}
-
-#controls {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
+/* vertical side menu — only visible on hover (window must be focused) */
+#menu {
+  flex: 0 0 auto;
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: 6px;
+  gap: 5px;
+  padding: 5px;
+  align-items: center;
+  justify-content: center;
   opacity: 0;
-  transition: opacity 0.2s;
+  transition: opacity 0.15s;
 }
-body.ctrl-top #controls {
-  bottom: auto;
-  top: 0;
-  flex-direction: column-reverse;
-}
-#app:hover #controls {
+#app:hover #menu {
   opacity: 1;
 }
-
-#menu {
-  display: flex;
-  gap: 4px;
-  justify-content: flex-start;
-  align-items: center;
-  flex-wrap: nowrap;
-}
-.dot {
-  width: 9px;
-  height: 9px;
-  flex: 0 0 auto;
-  border-radius: 50%;
-  background: #e05555;
-  box-shadow: 0 0 4px rgba(0, 0, 0, 0.45);
-}
-.dot.connected {
-  background: #4caf78;
-}
 #menu button {
-  height: 30px;
-  min-width: 30px;
-  padding: 0 9px;
+  width: 32px;
+  height: 32px;
   border: none;
-  border-radius: 8px;
+  border-radius: 9px;
   background: rgba(40, 40, 48, 0.88);
   color: #fff;
-  font-size: 14px;
+  font-size: 15px;
   cursor: pointer;
   backdrop-filter: blur(6px);
 }
 #menu button:hover {
   background: rgba(60, 60, 72, 0.95);
-}
-.size-btn {
-  font-size: 12px;
 }
 #voice-btn.recording {
   background: rgba(220, 70, 70, 0.95);
@@ -175,11 +109,50 @@ body.ctrl-top #controls {
     opacity: 0.55;
   }
 }
+.dot {
+  width: 9px;
+  height: 9px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: #e05555;
+  box-shadow: 0 0 4px rgba(0, 0, 0, 0.45);
+}
+.dot.connected {
+  background: #4caf78;
+}
 
+/* subtitle bubble over the pet's upper area */
+.bubble {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  max-width: var(--pet-w, 150px);
+  background: rgba(20, 20, 24, 0.8);
+  border-radius: 12px;
+  padding: 6px 10px;
+  font-size: 13px;
+  line-height: 1.4;
+  text-align: center;
+  backdrop-filter: blur(6px);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+  opacity: 0;
+  transition: opacity 0.2s;
+  pointer-events: none;
+  z-index: 5;
+}
+.bubble.show {
+  opacity: 1;
+}
+
+/* text input row at the bottom, shown when 💬 is toggled */
 .chat {
+  position: absolute;
+  bottom: 4px;
+  left: 4px;
+  right: 4px;
   display: flex;
   gap: 6px;
-  width: 100%;
+  z-index: 6;
 }
 .chat.hidden {
   display: none;
@@ -187,10 +160,10 @@ body.ctrl-top #controls {
 .chat input {
   flex: 1;
   min-width: 0;
-  padding: 7px 10px;
+  padding: 6px 9px;
   border-radius: 9px;
   border: 1px solid rgba(255, 255, 255, 0.15);
-  background: rgba(30, 30, 36, 0.88);
+  background: rgba(30, 30, 36, 0.9);
   color: #fff;
   font-size: 13px;
   outline: none;
@@ -199,7 +172,7 @@ body.ctrl-top #controls {
   border-color: rgba(102, 187, 153, 0.8);
 }
 .chat button[type="submit"] {
-  padding: 7px 12px;
+  padding: 6px 10px;
   border-radius: 9px;
   border: none;
   background: rgba(85, 170, 136, 0.92);
