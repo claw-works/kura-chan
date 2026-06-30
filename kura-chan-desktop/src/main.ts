@@ -308,6 +308,10 @@ async function init() {
   });
 
   // drag-and-drop: drop a text file onto the pet → read & send
+  // hide the menu when the window loses focus
+  await getCurrentWindow().onFocusChanged((e) => {
+    if (!e.payload) document.body.classList.remove("menu-open");
+  });
   await getCurrentWindow().onDragDropEvent(async (ev) => {
     const pl = ev.payload as any;
     if (pl?.type !== "drop" || !Array.isArray(pl.paths)) return;
