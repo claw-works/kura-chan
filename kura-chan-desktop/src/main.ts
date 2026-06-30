@@ -263,6 +263,13 @@ async function stopVoice() {
   }
 }
 
+function applySync(p: any) {
+  if (!p) return;
+  if (p.gender) gender = p.gender;
+  if (p.appearance) appearance = p.appearance;
+  loadPortrait();
+}
+
 async function init() {
   await listen<string>("ws-status", (e) => setStatus(String(e.payload)));
   await listen<any>("subtitle", (e) => {
@@ -275,12 +282,7 @@ async function init() {
       if (subtitle) setBubble(subtitle);
     }
   });
-  await listen<any>("sync", (e) => {
-    const p = e.payload;
-    if (p?.gender) gender = p.gender;
-    if (p?.appearance) appearance = p.appearance;
-    loadPortrait();
-  });
+  await listen<any>("sync", (e) => applySync(e.payload));
   await listen<any>("response", (e) => {
     const m = e.payload?.emotion;
     if (typeof m === "string" && m) {
@@ -339,6 +341,15 @@ async function init() {
       document.body.classList.remove("dragging");
       await updateSide();
       await clampToScreen();
+      // persist floating-window position (skip chat/settings mode — those resize)
+      if (!chatMode && !document.body.classList.contains("settings-open")) {
+        try {
+          const pos = await getCurrentWindow().outerPosition();
+          await invoke("save_window_pos", { x: pos.x, y: pos.y });
+        } catch {
+          /* ignore */
+        }
+      }
     }, 250);
   });
 
@@ -352,7 +363,23 @@ async function init() {
   loadPortrait();
   scheduleBlink();
   await applySize();
+  // restore last floating-window position (before computing menu side)
+  try {
+    const pos = await invoke<any>("get_window_pos");
+    if (pos && typeof pos.x === "number" && typeof pos.y === "number") {
+      await getCurrentWindow().setPosition(new PhysicalPosition(pos.x, pos.y));
+    }
+  } catch {
+    /* no saved position */
+  }
   await updateSide();
+  // catch up on the sync we may have missed before this listener was ready
+  try {
+    const s = await invoke<any>("get_last_sync");
+    if (s) applySync(s);
+  } catch {
+    /* none yet */
+  }
 
   // drag the pet to move the window; a plain click just focuses it (so the
   // OS lets the focused window receive hover events for the menu).

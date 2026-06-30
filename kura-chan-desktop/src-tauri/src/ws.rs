@@ -26,6 +26,9 @@ pub struct WsHandle {
     pub tx: mpsc::UnboundedSender<WsOut>,
     pub http_base: String,
     pub status: Arc<StdMutex<String>>,
+    /// Most recent `sync` message JSON, so the frontend can query it on startup
+    /// (the connect-time sync may arrive before the frontend's listener is ready).
+    pub last_sync: Arc<StdMutex<Option<String>>>,
 }
 
 fn set_status(app: &AppHandle, status: &Arc<StdMutex<String>>, value: &str) {
@@ -47,12 +50,14 @@ pub fn connect(
     let rx = Arc::new(Mutex::new(rx));
     let status = Arc::new(StdMutex::new("connecting".to_string()));
     let status2 = status.clone();
+    let last_sync = Arc::new(StdMutex::new(None));
+    let last_sync2 = last_sync.clone();
     let tx_tool = tx.clone(); // for sending ToolResults from tool execution
     tauri::async_runtime::spawn(async move {
         loop {
             set_status(&app, &status2, "connecting");
             let mut guard = rx.lock().await;
-            match run_conn(&app, &ws_url, &api_key, &device_id, &mut guard, &status2, &tx_tool).await {
+            match run_conn(&app, &ws_url, &api_key, &device_id, &mut guard, &status2, &tx_tool, &last_sync2).await {
                 Ok(()) => set_status(&app, &status2, "closed"),
                 Err(e) => set_status(&app, &status2, &format!("disconnected: {e}")),
             }
@@ -60,7 +65,7 @@ pub fn connect(
             tokio::time::sleep(Duration::from_secs(3)).await;
         }
     });
-    WsHandle { tx, http_base, status }
+    WsHandle { tx, http_base, status, last_sync }
 }
 
 async fn run_conn(
@@ -71,6 +76,7 @@ async fn run_conn(
     rx: &mut mpsc::UnboundedReceiver<WsOut>,
     status: &Arc<StdMutex<String>>,
     tx: &mpsc::UnboundedSender<WsOut>,
+    last_sync: &Arc<StdMutex<Option<String>>>,
 ) -> Result<(), String> {
     let mut req = ws_url.into_client_request().map_err(|e| e.to_string())?;
     {
@@ -123,7 +129,7 @@ async fn run_conn(
                         let tx2 = tx.clone();
                         tauri::async_runtime::spawn(execute_tool(tx2, call));
                     } else {
-                        handle_server_text(app, s);
+                        handle_server_text(app, s, last_sync);
                     }
                 }
                 Some(Ok(Message::Binary(b))) => handle_audio_frame(app, &b),
@@ -148,7 +154,7 @@ async fn run_conn(
 }
 
 /// Parse a server JSON message and re-emit it to the frontend by `type`.
-fn handle_server_text(app: &AppHandle, text: &str) {
+fn handle_server_text(app: &AppHandle, text: &str, last_sync: &Arc<StdMutex<Option<String>>>) {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(text) else {
         return;
     };
@@ -156,7 +162,13 @@ fn handle_server_text(app: &AppHandle, text: &str) {
     match typ {
         "subtitle" => { let _ = app.emit("subtitle", &v); }
         "stt" => { let _ = app.emit("stt", &v); }
-        "sync" => { let _ = app.emit("sync", &v); }
+        "sync" => {
+            // cache so the frontend can fetch it on startup if it missed the event
+            if let Ok(mut ls) = last_sync.lock() {
+                *ls = Some(text.to_string());
+            }
+            let _ = app.emit("sync", &v);
+        }
         "response" => { let _ = app.emit("response", &v); }
         "state" => { let _ = app.emit("state", &v); }
         "control" => { let _ = app.emit("control", &v); }

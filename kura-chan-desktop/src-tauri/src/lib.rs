@@ -57,6 +57,38 @@ fn load_settings() -> Settings {
     }
 }
 
+/// Most recent sync (gender/appearance/growth) — frontend queries on startup
+/// in case it missed the connect-time sync event.
+#[tauri::command]
+fn get_last_sync(handle: State<WsHandle>) -> Option<serde_json::Value> {
+    handle
+        .last_sync
+        .lock()
+        .ok()
+        .and_then(|s| s.clone())
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+}
+
+/// Persist the floating-window position to ~/.kura/window.json.
+#[tauri::command]
+fn save_window_pos(x: i32, y: i32) {
+    if let Some(dir) = kura_dir() {
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(
+            dir.join("window.json"),
+            serde_json::json!({ "x": x, "y": y }).to_string(),
+        );
+    }
+}
+
+/// Read the saved window position, if any.
+#[tauri::command]
+fn get_window_pos() -> Option<serde_json::Value> {
+    let p = kura_dir()?.join("window.json");
+    let c = std::fs::read_to_string(p).ok()?;
+    serde_json::from_str::<serde_json::Value>(&c).ok()
+}
+
 /// Current settings for the settings UI.
 #[tauri::command]
 fn get_settings() -> serde_json::Value {
@@ -213,7 +245,10 @@ pub fn run() {
             read_dropped,
             get_settings,
             save_settings,
-            get_history
+            get_history,
+            get_last_sync,
+            save_window_pos,
+            get_window_pos
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
