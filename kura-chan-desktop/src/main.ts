@@ -54,8 +54,11 @@ async function updateSide() {
     if (!mon) return;
     const msf = mon.scaleFactor || sf;
     const winCenterX = (pos.x + size.width / 2) / msf;
+    const winCenterY = (pos.y + size.height / 2) / msf;
     const screenCenterX = (mon.position.x + mon.size.width / 2) / msf;
+    const screenCenterY = (mon.position.y + mon.size.height / 2) / msf;
     document.body.classList.toggle("menu-left", winCenterX > screenCenterX);
+    document.body.classList.toggle("pet-bottom", winCenterY > screenCenterY);
   } catch {
     /* ignore */
   }

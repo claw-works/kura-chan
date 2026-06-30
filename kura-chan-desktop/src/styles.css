@@ -25,12 +25,16 @@ body {
   background: transparent;
   overflow: hidden;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: flex-start;
 }
+/* pet hugs the screen-edge corner; menu falls on the inner side.
+   menu-left → pet on the right; pet-bottom → pet at the bottom. */
 body.menu-left #app {
-  justify-content: flex-end;
   flex-direction: row-reverse;
+}
+body.pet-bottom #app {
+  align-items: flex-end;
 }
 
 #stage {
