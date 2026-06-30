@@ -116,7 +116,9 @@ async fn run_conn(
             incoming = read.next() => match incoming {
                 Some(Ok(Message::Text(t))) => {
                     let s = t.as_str();
+                    eprintln!("[ws←] {}", s.chars().take(400).collect::<String>());
                     if let Some(call) = parse_tool_call(s) {
+                        eprintln!("[tool] got tool_call: tool={} call_id={} params={}", call.tool, call.call_id, call.params);
                         // execute device tool off-thread, send ToolResult back via tx
                         let tx2 = tx.clone();
                         tauri::async_runtime::spawn(execute_tool(tx2, call));
@@ -208,13 +210,22 @@ fn parse_tool_call(s: &str) -> Option<DeviceToolCall> {
 /// Run a device tool and send the ToolResult back to the server.
 async fn execute_tool(tx: mpsc::UnboundedSender<WsOut>, call: DeviceToolCall) {
     let (status, result) = run_tool(&call.tool, &call.params).await;
+    eprintln!(
+        "[tool] {} → status={} result={}",
+        call.tool,
+        status,
+        result.to_string().chars().take(200).collect::<String>()
+    );
     let msg = json!({
         "type": "tool_result",
         "call_id": call.call_id,
         "status": status,
         "result": result,
     });
-    let _ = tx.send(WsOut::Text(msg.to_string()));
+    match tx.send(WsOut::Text(msg.to_string())) {
+        Ok(()) => eprintln!("[tool→] sent tool_result call_id={}", call.call_id),
+        Err(e) => eprintln!("[tool→] FAILED to send tool_result: {e}"),
+    }
 }
 
 async fn run_tool(tool: &str, params: &serde_json::Value) -> (&'static str, serde_json::Value) {
