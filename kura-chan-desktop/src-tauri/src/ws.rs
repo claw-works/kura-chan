@@ -47,11 +47,12 @@ pub fn connect(
     let rx = Arc::new(Mutex::new(rx));
     let status = Arc::new(StdMutex::new("connecting".to_string()));
     let status2 = status.clone();
+    let tx_tool = tx.clone(); // for sending ToolResults from tool execution
     tauri::async_runtime::spawn(async move {
         loop {
             set_status(&app, &status2, "connecting");
             let mut guard = rx.lock().await;
-            match run_conn(&app, &ws_url, &api_key, &device_id, &mut guard, &status2).await {
+            match run_conn(&app, &ws_url, &api_key, &device_id, &mut guard, &status2, &tx_tool).await {
                 Ok(()) => set_status(&app, &status2, "closed"),
                 Err(e) => set_status(&app, &status2, &format!("disconnected: {e}")),
             }
@@ -69,6 +70,7 @@ async fn run_conn(
     device_id: &str,
     rx: &mut mpsc::UnboundedReceiver<WsOut>,
     status: &Arc<StdMutex<String>>,
+    tx: &mpsc::UnboundedSender<WsOut>,
 ) -> Result<(), String> {
     let mut req = ws_url.into_client_request().map_err(|e| e.to_string())?;
     {
@@ -102,7 +104,7 @@ async fn run_conn(
             "output_sample_rate": 16000,
             "output_channels": 1
         },
-        "capabilities": ["text"]
+        "capabilities": ["text", "notify", "read_file"]
     });
     write
         .send(Message::Text(hello.to_string().into()))
@@ -112,7 +114,16 @@ async fn run_conn(
     loop {
         tokio::select! {
             incoming = read.next() => match incoming {
-                Some(Ok(Message::Text(t))) => handle_server_text(app, t.as_str()),
+                Some(Ok(Message::Text(t))) => {
+                    let s = t.as_str();
+                    if let Some(call) = parse_tool_call(s) {
+                        // execute device tool off-thread, send ToolResult back via tx
+                        let tx2 = tx.clone();
+                        tauri::async_runtime::spawn(execute_tool(tx2, call));
+                    } else {
+                        handle_server_text(app, s);
+                    }
+                }
                 Some(Ok(Message::Binary(b))) => handle_audio_frame(app, &b),
                 Some(Ok(Message::Close(_))) | None => break,
                 Some(Ok(_)) => {}
@@ -170,4 +181,73 @@ fn handle_audio_frame(app: &AppHandle, data: &[u8]) {
     use base64::Engine;
     let b64 = base64::engine::general_purpose::STANDARD.encode(payload);
     let _ = app.emit("audio", b64);
+}
+
+
+// ===== device tools (executed locally, results sent back as ToolResult) =====
+
+struct DeviceToolCall {
+    call_id: String,
+    tool: String,
+    params: serde_json::Value,
+}
+
+/// Parse a `tool_call` server message; returns None for any other message type.
+fn parse_tool_call(s: &str) -> Option<DeviceToolCall> {
+    let v: serde_json::Value = serde_json::from_str(s).ok()?;
+    if v.get("type")?.as_str()? != "tool_call" {
+        return None;
+    }
+    Some(DeviceToolCall {
+        call_id: v.get("call_id")?.as_str()?.to_string(),
+        tool: v.get("tool")?.as_str()?.to_string(),
+        params: v.get("params").cloned().unwrap_or_else(|| json!({})),
+    })
+}
+
+/// Run a device tool and send the ToolResult back to the server.
+async fn execute_tool(tx: mpsc::UnboundedSender<WsOut>, call: DeviceToolCall) {
+    let (status, result) = run_tool(&call.tool, &call.params).await;
+    let msg = json!({
+        "type": "tool_result",
+        "call_id": call.call_id,
+        "status": status,
+        "result": result,
+    });
+    let _ = tx.send(WsOut::Text(msg.to_string()));
+}
+
+async fn run_tool(tool: &str, params: &serde_json::Value) -> (&'static str, serde_json::Value) {
+    match tool {
+        "notify" => {
+            let title = params.get("title").and_then(|v| v.as_str()).unwrap_or("小爪");
+            let body = params.get("body").and_then(|v| v.as_str()).unwrap_or("");
+            notify_macos(title, body);
+            ("ok", json!({ "shown": true }))
+        }
+        "read_file" => {
+            // NOTE: reads an arbitrary path the user's agent chose. Trusted for
+            // now (user's own machine); add a path allowlist / confirmation later.
+            let path = params.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            match tokio::fs::read_to_string(path).await {
+                Ok(c) => {
+                    let clipped: String = c.chars().take(4000).collect();
+                    ("ok", json!({ "content": clipped }))
+                }
+                Err(e) => ("error", json!(e.to_string())),
+            }
+        }
+        _ => ("error", json!(format!("unknown tool '{tool}'"))),
+    }
+}
+
+/// Show a macOS notification via osascript (simple, no extra deps).
+fn notify_macos(title: &str, body: &str) {
+    let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+    let script = format!(
+        "display notification \"{}\" with title \"{}\"",
+        esc(body),
+        esc(title)
+    );
+    let _ = std::process::Command::new("osascript").arg("-e").arg(script).output();
 }
