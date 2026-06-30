@@ -7,6 +7,7 @@ let gender = "girl";
 let appearance: Record<string, any> = {};
 let subtitle = "";
 let recording = false;
+let lastInputText = false; // last turn came from typing → reply text-only (no TTS)
 
 // expression / animation
 let currentExpr = "neutral";
@@ -218,6 +219,7 @@ function loadPortrait() {
 }
 
 async function startVoice() {
+  lastInputText = false; // mic → voice + text output
   ensureCtx();
   recording = true;
   el("#voice-btn").classList.add("recording");
@@ -262,12 +264,16 @@ async function init() {
     }
   });
   await listen("audio-start", () => {
+    if (lastInputText) return; // text chat → no voice output / mouth animation
     const ctx = ensureCtx();
     nextAudioTime = ctx.currentTime;
     speaking = true;
     startTalk();
   });
-  await listen<string>("audio", (e) => playPcmChunk(e.payload as string));
+  await listen<string>("audio", (e) => {
+    if (lastInputText) return;
+    playPcmChunk(e.payload as string);
+  });
   await listen("speak_done", () => {
     speaking = false;
     currentExpr = "neutral";
@@ -322,19 +328,29 @@ async function init() {
   const stage = el("#stage");
   let dragStartX = 0;
   let dragStartY = 0;
+  let didDrag = false;
   stage.addEventListener("mousedown", (e) => {
     const me = e as MouseEvent;
     if (me.button !== 0) return;
     dragStartX = me.screenX;
     dragStartY = me.screenY;
+    didDrag = false;
   });
   stage.addEventListener("mousemove", (e) => {
     const me = e as MouseEvent;
     if (me.buttons !== 1) return;
-    if (Math.abs(me.screenX - dragStartX) > 4 || Math.abs(me.screenY - dragStartY) > 4) {
+    if (!didDrag && (Math.abs(me.screenX - dragStartX) > 4 || Math.abs(me.screenY - dragStartY) > 4)) {
+      didDrag = true;
       document.body.classList.add("dragging");
       void getCurrentWindow().startDragging();
     }
+  });
+  stage.addEventListener("click", () => {
+    if (didDrag) {
+      didDrag = false;
+      return; // was a drag, not a click
+    }
+    document.body.classList.toggle("menu-open"); // click pet → toggle menu
   });
 
   // text input form
@@ -344,6 +360,7 @@ async function init() {
     const input = el("#chat-input") as HTMLInputElement;
     const text = input.value.trim();
     if (!text) return;
+    lastInputText = true; // typed → reply as text only
     ensureCtx();
     subtitle = "";
     setBubble("…");

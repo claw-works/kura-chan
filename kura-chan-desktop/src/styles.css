@@ -51,9 +51,6 @@ body.menu-left #app {
   object-fit: contain;
   -webkit-user-drag: none;
 }
-.portrait {
-  filter: drop-shadow(0 6px 16px rgba(0, 0, 0, 0.35));
-}
 .face {
   pointer-events: none;
 }
@@ -79,7 +76,7 @@ body.menu-left #app {
   opacity: 0;
   transition: opacity 0.15s;
 }
-#app:hover #menu {
+body.menu-open #menu {
   opacity: 1;
 }
 body.dragging #menu {
