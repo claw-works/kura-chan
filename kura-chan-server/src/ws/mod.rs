@@ -402,7 +402,18 @@ async fn run_turn(
     }
     db::touch_session(&state.db, &conv_session).await;
     for (k, v) in &appearance_ops {
-        db::set_appearance_key(&state.db, &actor.actor_id, k, v.clone()).await;
+        if k == "wear" {
+            // [do:wear=X]: X is a catalog variant — map it to its slot(s) and
+            // persist (a hairstyle covers hair_back+hair_front; costume is one).
+            if let Some(val) = v.as_str() {
+                let slots = db::catalog_slots_for_variant(&state.db, &actor.gender, val).await;
+                for slot in slots {
+                    db::set_appearance_key(&state.db, &actor.actor_id, &slot, v.clone()).await;
+                }
+            }
+        } else {
+            db::set_appearance_key(&state.db, &actor.actor_id, k, v.clone()).await;
+        }
     }
     let event_xp: i32 = turn_growth.events.iter().map(|lvl| growth.event_xp(lvl)).sum();
     let dxp = growth.base_xp + event_xp;
@@ -419,7 +430,10 @@ async fn run_turn(
     .await
     {
         *actor = a;
-        send_event(tx, sync_msg(actor, false, growth.xp_base)).await;
+        // include appearance in Sync when this turn changed it, so clients
+        // (e.g. desktop) actually re-render the new outfit/hairstyle.
+        let full = !appearance_ops.is_empty();
+        send_event(tx, sync_msg(actor, full, growth.xp_base)).await;
     }
     if want_new_session {
         if let Ok(sid) = db::new_session(&state.db, &actor.actor_id).await {
@@ -501,6 +515,7 @@ fn extract_tags(
                     "bg" => apps.push(("bg".into(), serde_json::Value::String(v.to_string()))),
                     "blush" => apps.push(("blush".into(), serde_json::json!(b))),
                     "glasses" => apps.push(("glasses".into(), serde_json::json!(b))),
+                    "wear" => apps.push(("wear".into(), serde_json::Value::String(v.to_string()))),
                     _ => {}
                 }
             }

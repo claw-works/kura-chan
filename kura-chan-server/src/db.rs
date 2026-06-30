@@ -376,6 +376,19 @@ pub async fn get_fragments(db: &Db, actor_id: &str, level: i32, bond: i32) -> Ve
 }
 
 /// Catalog items unlocked for the given gender at level/bond ('*' = any gender, e.g. bg).
+/// Slots a catalog variant belongs to — for `[do:wear=X]`. A hairstyle maps to
+/// hair_back+hair_front (same variant name), a costume to a single slot.
+pub async fn catalog_slots_for_variant(db: &Db, gender: &str, variant: &str) -> Vec<String> {
+    sqlx::query_scalar::<_, String>(
+        "SELECT slot FROM catalog_items WHERE gender=$1 AND variant=$2",
+    )
+    .bind(gender)
+    .bind(variant)
+    .fetch_all(db)
+    .await
+    .unwrap_or_default()
+}
+
 pub async fn get_catalog(db: &Db, gender: &str, level: i32, bond: i32) -> Vec<CatalogItem> {
     sqlx::query_as::<_, CatalogItem>(
         "SELECT gender, slot, variant, min_level, min_bond, display_name FROM catalog_items \
