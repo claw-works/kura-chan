@@ -21,10 +21,15 @@
         <button type="button" id="size-btn" title="大小">⊙</button>
         <button type="button" id="settings-btn" title="设置">⚙</button>
       </div>
-      <form id="chat-form" class="chat hidden">
-        <input id="chat-input" placeholder="说点什么…" autocomplete="off" />
-        <button type="submit">发送</button>
-      </form>
+      <div id="chatbox" class="chatbox">
+        <div id="chat-log"></div>
+        <div id="chat-bar">
+          <button type="button" id="tts-btn" title="语音播放开关">🔊</button>
+          <input id="chat-input" placeholder="说点什么…" autocomplete="off" />
+          <button type="button" id="chat-send">发送</button>
+          <button type="button" id="chat-exit" title="返回">×</button>
+        </div>
+      </div>
       <div id="settings" class="settings">
         <h3>设置</h3>
         <label>Server WS 地址<input id="set-ws" placeholder="ws://host:port/ws/device" /></label>

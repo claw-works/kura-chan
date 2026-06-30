@@ -7,7 +7,6 @@ let gender = "girl";
 let appearance: Record<string, any> = {};
 let subtitle = "";
 let recording = false;
-let lastInputText = false; // last turn came from typing → reply text-only (no TTS)
 
 // expression / animation
 let currentExpr = "neutral";
@@ -19,9 +18,11 @@ const PET_SIZES = [96, 160, 260]; // 小 / 中 / 大 (cycled by one button)
 const PET_RATIO = 0.83;
 const MENU_W = 44; // vertical menu strip width
 const MENU_MIN_H = 170; // min height to fit the vertical menu
-const FORM_H = 42; // text input row height (when open)
 let sizeIdx = 1;
-let textOpen = false;
+let chatMode = false;
+let ttsOn = true; // speaker toggle: play TTS audio or not
+let streamingBot: HTMLElement | null = null;
+let botBuf = "";
 
 function applyDims(): { pw: number; ph: number } {
   const ph = PET_SIZES[sizeIdx];
@@ -33,7 +34,7 @@ function applyDims(): { pw: number; ph: number } {
 async function applySize() {
   const { pw, ph } = applyDims();
   const winW = pw + MENU_W;
-  const winH = Math.max(ph, MENU_MIN_H) + (textOpen ? FORM_H : 0);
+  const winH = Math.max(ph, MENU_MIN_H);
   try {
     await getCurrentWindow().setSize(new LogicalSize(winW, winH));
     await clampToScreen();
@@ -222,7 +223,6 @@ function loadPortrait() {
 }
 
 async function startVoice() {
-  lastInputText = false; // mic → voice + text output
   ensureCtx();
   recording = true;
   el("#voice-btn").classList.add("recording");
@@ -250,8 +250,14 @@ async function stopVoice() {
 async function init() {
   await listen<string>("ws-status", (e) => setStatus(String(e.payload)));
   await listen<any>("subtitle", (e) => {
-    subtitle += e.payload?.text ?? "";
-    if (subtitle) setBubble(subtitle);
+    const t = e.payload?.text ?? "";
+    if (chatMode) {
+      botBuf += t;
+      updateStreamingBot(stripTags(botBuf));
+    } else {
+      subtitle += t;
+      if (subtitle) setBubble(subtitle);
+    }
   });
   await listen<any>("sync", (e) => {
     const p = e.payload;
@@ -267,20 +273,22 @@ async function init() {
     }
   });
   await listen("audio-start", () => {
-    if (lastInputText) return; // text chat → no voice output / mouth animation
+    if (!ttsOn) return; // speaker off → no voice / mouth animation
     const ctx = ensureCtx();
     nextAudioTime = ctx.currentTime;
     speaking = true;
     startTalk();
   });
   await listen<string>("audio", (e) => {
-    if (lastInputText) return;
+    if (!ttsOn) return;
     playPcmChunk(e.payload as string);
   });
   await listen("speak_done", () => {
     speaking = false;
     currentExpr = "neutral";
     stopTalk();
+    streamingBot = null;
+    botBuf = "";
   });
 
   // drag-and-drop: drop a text file onto the pet → read & send
@@ -356,23 +364,29 @@ async function init() {
     document.body.classList.toggle("menu-open"); // click pet → toggle menu
   });
 
-  // text input form
-  const form = el("#chat-form") as HTMLFormElement;
-  form.addEventListener("submit", async (ev) => {
-    ev.preventDefault();
-    const input = el("#chat-input") as HTMLInputElement;
-    const text = input.value.trim();
+  // chat (dialog) mode controls
+  const chatInput = el("#chat-input") as HTMLInputElement;
+  function sendChat() {
+    const text = chatInput.value.trim();
     if (!text) return;
-    lastInputText = true; // typed → reply as text only
-    ensureCtx();
-    subtitle = "";
-    setBubble("…");
-    input.value = "";
-    try {
-      await invoke("send_text", { text });
-    } catch (err) {
-      setBubble("发送失败：" + err);
+    appendMsg("user", text);
+    botBuf = "";
+    streamingBot = null;
+    chatInput.value = "";
+    if (ttsOn) ensureCtx();
+    void invoke("send_text", { text });
+  }
+  el("#chat-send").addEventListener("click", sendChat);
+  chatInput.addEventListener("keydown", (e) => {
+    if ((e as KeyboardEvent).key === "Enter") {
+      e.preventDefault();
+      sendChat();
     }
+  });
+  el("#chat-exit").addEventListener("click", () => void exitChat());
+  el("#tts-btn").addEventListener("click", () => {
+    ttsOn = !ttsOn;
+    syncTtsBtn();
   });
 
   // menu buttons
@@ -380,12 +394,7 @@ async function init() {
     if (!recording) void startVoice();
     else void stopVoice();
   });
-  el("#text-btn").addEventListener("click", async () => {
-    textOpen = !textOpen;
-    form.classList.toggle("hidden", !textOpen);
-    await applySize();
-    if (textOpen) (el("#chat-input") as HTMLInputElement).focus();
-  });
+  el("#text-btn").addEventListener("click", () => void enterChat());
   el("#size-btn").addEventListener("click", () => {
     sizeIdx = (sizeIdx + 1) % PET_SIZES.length;
     void applySize();
@@ -429,6 +438,68 @@ async function openSettings() {
 }
 async function closeSettings() {
   document.body.classList.remove("settings-open");
+  await applySize();
+}
+
+// ===== chat (dialog) mode =====
+function stripTags(s: string): string {
+  return s.replace(/\[[^\]]*\]/g, "").trim();
+}
+function syncTtsBtn() {
+  const b = el("#tts-btn");
+  b.textContent = ttsOn ? "🔊" : "🔇";
+  b.classList.toggle("off", !ttsOn);
+}
+function appendMsg(role: string, text: string) {
+  if (!text) return;
+  const log = el("#chat-log");
+  const div = document.createElement("div");
+  div.className = "msg " + (role === "user" ? "user" : "bot");
+  div.textContent = text;
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
+}
+// streaming assistant reply: keep updating the last bubble until speak_done
+function updateStreamingBot(text: string) {
+  const log = el("#chat-log");
+  if (!streamingBot) {
+    streamingBot = document.createElement("div");
+    streamingBot.className = "msg bot";
+    log.appendChild(streamingBot);
+  }
+  streamingBot.textContent = text;
+  log.scrollTop = log.scrollHeight;
+}
+async function enterChat() {
+  chatMode = true;
+  document.body.classList.remove("menu-open");
+  document.body.classList.add("chat-mode");
+  syncTtsBtn();
+  try {
+    await getCurrentWindow().setSize(new LogicalSize(380, 520));
+    await clampToScreen();
+  } catch (err) {
+    console.error(err);
+  }
+  const log = el("#chat-log");
+  log.innerHTML = "";
+  streamingBot = null;
+  botBuf = "";
+  try {
+    const h = await invoke<any>("get_history");
+    for (const m of h.messages || []) {
+      appendMsg(m.role === "user" ? "user" : "bot", stripTags(m.content));
+    }
+  } catch {
+    /* no history / offline */
+  }
+  (el("#chat-input") as HTMLInputElement).focus();
+}
+async function exitChat() {
+  chatMode = false;
+  document.body.classList.remove("chat-mode");
+  streamingBot = null;
+  botBuf = "";
   await applySize();
 }
 
