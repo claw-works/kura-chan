@@ -159,11 +159,10 @@ async fn handle_socket(socket: WebSocket, device_id: String, mut actor: Actor, s
                         }
                     }
                     Ok(ClientMessage::Status(status)) => {
-                        if let Some(ap) = &status.appearance {
-                            let mut ap2 = ap.clone();
-                            if let Some(o) = ap2.as_object_mut() { o.remove("bg"); }  // bg is server-owned
-                            db::set_appearance(&state.db, &actor.actor_id, &ap2).await;
-                        }
+                        // appearance is server-authoritative (changed via [do:wear],
+                        // pushed via sync). Ignore device-reported appearance so a
+                        // device's local/stale state can't clobber a change made from
+                        // another device (was causing desktop vs firmware mismatch).
                         for ev in session.handle_status(status) {
                             send_event(&tx, ev).await;
                         }
