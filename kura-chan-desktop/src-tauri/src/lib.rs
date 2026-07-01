@@ -6,7 +6,8 @@ use std::path::PathBuf;
 
 use audio::Recorder;
 use serde_json::json;
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 use ws::{WsHandle, WsOut};
 
 /// ~/.kura — agent data dir (config, later: skills, chat history, etc.)
@@ -38,6 +39,7 @@ struct Settings {
     http_base: String,
     api_key: String,
     device_id: String,
+    hotkey: String,
 }
 /// Resolve settings: ~/.kura/.env > process env > built-in default.
 fn load_settings() -> Settings {
@@ -54,6 +56,7 @@ fn load_settings() -> Settings {
         http_base: get("KURA_HTTP_BASE", "http://127.0.0.1:18099"),
         api_key: get("KURA_API_KEY", ""),
         device_id: get("KURA_DEVICE_ID", "KURA_DESKTOP_001"),
+        hotkey: get("KURA_HOTKEY", "CmdOrCtrl+Shift+K"),
     }
 }
 
@@ -217,9 +220,26 @@ fn read_dropped(path: String) -> Result<String, String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, _shortcut, event| {
+                    // On key-down: bring the window forward and let the frontend
+                    // decide what to do (start/stop voice).
+                    if event.state() == ShortcutState::Pressed {
+                        if let Some(w) = app.get_webview_window("main") {
+                            let _ = w.show();
+                            let _ = w.unminimize();
+                            let _ = w.set_focus();
+                        }
+                        let _ = app.emit("hotkey", ());
+                    }
+                })
+                .build(),
+        )
         .setup(|app| {
             // Connection config from ~/.kura/.env (falls back to env / defaults).
             let s = load_settings();
+            let hotkey = s.hotkey.clone();
             let handle = ws::connect(
                 app.handle().clone(),
                 s.ws_url,
@@ -229,6 +249,15 @@ pub fn run() {
             );
             app.manage(handle);
             app.manage(Recorder::new());
+
+            // Global hotkey (default Cmd/Ctrl+Shift+K): wake + voice from anywhere.
+            match hotkey.parse::<tauri_plugin_global_shortcut::Shortcut>() {
+                Ok(sc) => match app.global_shortcut().register(sc) {
+                    Ok(()) => eprintln!("[hotkey] registered: {hotkey}"),
+                    Err(e) => eprintln!("[hotkey] register failed: {e}"),
+                },
+                Err(e) => eprintln!("[hotkey] invalid shortcut '{hotkey}': {e}"),
+            }
 
             // status-bar tray icon with a quit menu
             let quit = tauri::menu::MenuItem::with_id(app, "quit", "退出小爪", true, None::<&str>)?;

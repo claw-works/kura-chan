@@ -301,6 +301,16 @@ async function init() {
     }
   });
   await listen<any>("sync", (e) => applySync(e.payload));
+  // global hotkey: bring to screen, then toggle voice (start / stop-and-send)
+  await listen("hotkey", async () => {
+    try {
+      await clampToScreen();
+    } catch {
+      /* ignore */
+    }
+    if (recording) await stopVoice();
+    else await startVoice();
+  });
   await listen<any>("response", (e) => {
     const m = e.payload?.emotion;
     if (typeof m === "string" && m) {
