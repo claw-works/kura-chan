@@ -235,6 +235,7 @@ function loadPortrait() {
   if (a.glasses === true) p.set("glasses", "1");
   p.set("face", "none");
   p.set("t", String(Date.now()));
+  img.onerror = () => console.error("[portrait] load failed:", img.src);
   img.src = `${httpBase}/assets/composite_png/${gender}?${p.toString()}`;
   setFace(currentExpr);
 }
@@ -385,6 +386,7 @@ async function init() {
     const pos = await invoke<any>("get_window_pos");
     if (pos && typeof pos.x === "number" && typeof pos.y === "number") {
       await getCurrentWindow().setPosition(new PhysicalPosition(pos.x, pos.y));
+      await clampToScreen(); // saved pos may now be off-screen (monitor/res changed)
     }
   } catch {
     /* no saved position */
