@@ -328,13 +328,21 @@ pub fn run() {
             }
 
             // status-bar tray icon with an action menu
-            use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+            use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
             let listen_it = MenuItem::with_id(app, "listen", "开始聆听    ⌘⇧K", true, None::<&str>)?;
             let chat_it = MenuItem::with_id(app, "chat", "打开聊天窗口", true, None::<&str>)?;
+            let size_s = MenuItem::with_id(app, "size_0", "小", true, None::<&str>)?;
+            let size_m = MenuItem::with_id(app, "size_1", "中", true, None::<&str>)?;
+            let size_l = MenuItem::with_id(app, "size_2", "大", true, None::<&str>)?;
+            let size_menu = Submenu::with_items(app, "大小", true, &[&size_s, &size_m, &size_l])?;
+            let settings_it = MenuItem::with_id(app, "settings", "设置…", true, None::<&str>)?;
             let ct_it = MenuItem::with_id(app, "toggle_ct", "切换穿透模式", true, None::<&str>)?;
             let sep = PredefinedMenuItem::separator(app)?;
             let quit = MenuItem::with_id(app, "quit", "退出小爪", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&listen_it, &chat_it, &ct_it, &sep, &quit])?;
+            let menu = Menu::with_items(
+                app,
+                &[&listen_it, &chat_it, &size_menu, &settings_it, &ct_it, &sep, &quit],
+            )?;
             let _tray = tauri::tray::TrayIconBuilder::new()
                 .icon(app.default_window_icon().unwrap().clone())
                 .menu(&menu)
@@ -346,7 +354,8 @@ pub fn run() {
                             let _ = w.set_focus();
                         }
                     };
-                    match event.id.as_ref() {
+                    let id = event.id.as_ref();
+                    match id {
                         "quit" => app.exit(0),
                         "listen" => {
                             focus(app);
@@ -357,6 +366,11 @@ pub fn run() {
                             apply_click_through(app, false);
                             let _ = app.emit("open-chat", ());
                         }
+                        "settings" => {
+                            focus(app);
+                            apply_click_through(app, false);
+                            let _ = app.emit("open-settings", ());
+                        }
                         "toggle_ct" => {
                             let cur = app
                                 .try_state::<ClickThrough>()
@@ -366,6 +380,11 @@ pub fn run() {
                                 focus(app);
                             }
                             apply_click_through(app, !cur);
+                        }
+                        s if s.starts_with("size_") => {
+                            if let Ok(idx) = s[5..].parse::<u32>() {
+                                let _ = app.emit("set-size", idx);
+                            }
                         }
                         _ => {}
                     }

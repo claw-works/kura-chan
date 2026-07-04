@@ -14,11 +14,10 @@ let currentExpr = "neutral";
 let speaking = false;
 let talkTimer: number | undefined;
 
-// layout: window = pet + a narrow vertical menu strip beside it.
-const PET_SIZES = [96, 160, 260]; // 小 / 中 / 大 (cycled by one button)
+// layout: window = pet with a small listen button strip below it.
+const PET_SIZES = [96, 160, 260]; // 小 / 中 / 大
 const PET_RATIO = 0.83;
-const MENU_W = 44; // vertical menu strip width
-const MENU_MIN_H = 200; // min height to fit the vertical menu (dot + 5 buttons)
+const LISTEN_H = 40; // listen button strip height under the pet
 let sizeIdx = 1;
 let chatMode = false;
 let ttsOn = true; // speaker toggle: play TTS audio or not
@@ -35,10 +34,8 @@ function applyDims(): { pw: number; ph: number } {
 }
 async function applySize() {
   const { pw, ph } = applyDims();
-  const winW = pw + MENU_W;
-  const winH = Math.max(ph, MENU_MIN_H);
   try {
-    await getCurrentWindow().setSize(new LogicalSize(winW, winH));
+    await getCurrentWindow().setSize(new LogicalSize(pw, ph + LISTEN_H));
     await clampToScreen();
   } catch (err) {
     console.error("setSize failed", err);
@@ -48,7 +45,7 @@ async function applySize() {
 async function restoreFloat() {
   const { pw, ph } = applyDims();
   try {
-    await getCurrentWindow().setSize(new LogicalSize(pw + MENU_W, Math.max(ph, MENU_MIN_H)));
+    await getCurrentWindow().setSize(new LogicalSize(pw, ph + LISTEN_H));
     if (savedPos) {
       await getCurrentWindow().setPosition(new PhysicalPosition(savedPos.x, savedPos.y));
       savedPos = null;
@@ -60,29 +57,7 @@ async function restoreFloat() {
   }
 }
 // put the menu on the side with more room: window in right half → menu on left
-async function updateSide() {
-  try {
-    const win = getCurrentWindow();
-    const [pos, size, sf, mon] = await Promise.all([
-      win.outerPosition(),
-      win.outerSize(),
-      win.scaleFactor(),
-      currentMonitor(),
-    ]);
-    if (!mon) return;
-    const msf = mon.scaleFactor || sf;
-    const winCenterX = (pos.x + size.width / 2) / msf;
-    const winCenterY = (pos.y + size.height / 2) / msf;
-    const screenCenterX = (mon.position.x + mon.size.width / 2) / msf;
-    const screenCenterY = (mon.position.y + mon.size.height / 2) / msf;
-    document.body.classList.toggle("menu-left", winCenterX > screenCenterX);
-    document.body.classList.toggle("pet-bottom", winCenterY > screenCenterY);
-  } catch {
-    /* ignore */
-  }
-}
-
-// keep the whole window (pet + menu) on screen so the menu is never clipped
+// keep the whole window on screen
 async function clampToScreen() {
   try {
     const win = getCurrentWindow();
@@ -146,9 +121,12 @@ function el(sel: string): HTMLElement {
   return document.querySelector(sel)!;
 }
 function setStatus(s: string) {
-  const dot = el("#dot");
-  dot.classList.toggle("connected", s === "connected");
-  dot.setAttribute("title", label(s));
+  // no status dot anymore; reflect connection on the listen button
+  const b = document.getElementById("listen-btn");
+  if (b) {
+    b.classList.toggle("offline", s !== "connected");
+    b.setAttribute("title", s === "connected" ? "聆听（说完自动发送）" : label(s));
+  }
 }
 const SUBTITLE_MS = 5000;
 let bubbleTimer: number | undefined;
@@ -277,7 +255,7 @@ function loadPortrait() {
 async function startVoice() {
   ensureCtx();
   recording = true;
-  el("#voice-btn").classList.add("recording");
+  el("#listen-btn").classList.add("recording");
   subtitle = "";
   setBubble("聆听中…");
   try {
@@ -295,7 +273,7 @@ async function startVoice() {
     }, 250);
   } catch (err) {
     recording = false;
-    el("#voice-btn").classList.remove("recording");
+    el("#listen-btn").classList.remove("recording");
     setBubble("录音失败：" + err);
   }
 }
@@ -306,7 +284,7 @@ async function stopVoice() {
   }
   if (!recording) return; // already stopped (avoid double send)
   recording = false;
-  el("#voice-btn").classList.remove("recording");
+  el("#listen-btn").classList.remove("recording");
   setBubble("思考中…");
   try {
     await invoke("stop_recording");
@@ -378,10 +356,6 @@ async function init() {
   });
 
   // drag-and-drop: drop a text file onto the pet → read & send
-  // hide the menu when the window loses focus
-  await getCurrentWindow().onFocusChanged((e) => {
-    if (!e.payload) document.body.classList.remove("menu-open");
-  });
   await getCurrentWindow().onDragDropEvent(async (ev) => {
     const pl = ev.payload as any;
     if (pl?.type !== "drop" || !Array.isArray(pl.paths)) return;
@@ -407,7 +381,6 @@ async function init() {
     if (moveTimer) clearTimeout(moveTimer);
     moveTimer = window.setTimeout(async () => {
       document.body.classList.remove("dragging");
-      await updateSide();
       await clampToScreen();
       // persist floating-window position (skip chat/settings mode — those resize)
       if (!chatMode && !document.body.classList.contains("settings-open")) {
@@ -441,7 +414,6 @@ async function init() {
   } catch {
     /* no saved position */
   }
-  await updateSide();
   // catch up on the sync we may have missed before this listener was ready
   try {
     const s = await invoke<any>("get_last_sync");
@@ -473,11 +445,7 @@ async function init() {
     }
   });
   stage.addEventListener("click", () => {
-    if (didDrag) {
-      didDrag = false;
-      return; // was a drag, not a click
-    }
-    document.body.classList.toggle("menu-open"); // click pet → toggle menu
+    didDrag = false; // reset drag flag; single-click has no action (use listen button)
   });
 
   // chat (dialog) mode controls
@@ -520,25 +488,20 @@ async function init() {
   });
 
   // menu buttons
-  el("#voice-btn").addEventListener("click", () => {
+  // single listen button under the pet
+  el("#listen-btn").addEventListener("click", () => {
     if (!recording) void startVoice();
     else void stopVoice();
   });
-  el("#text-btn").addEventListener("click", () => void enterChat());
-  el("#size-btn").addEventListener("click", () => {
-    sizeIdx = (sizeIdx + 1) % PET_SIZES.length;
-    void applySize();
-  });
-  el("#settings-btn").addEventListener("click", () => void openSettings());
-  el("#ghost-btn").addEventListener("click", async () => {
-    document.body.classList.remove("menu-open");
-    try {
-      await invoke("set_click_through", { on: true });
-      setBubble("穿透已开启，按 ⌘⇧K 或状态栏菜单唤回小爪");
-    } catch (err) {
-      setBubble("穿透失败：" + err);
+  // tray-driven actions: size submenu / settings
+  await listen<number>("set-size", (e) => {
+    const i = Number(e.payload);
+    if (i >= 0 && i < PET_SIZES.length) {
+      sizeIdx = i;
+      void applySize();
     }
   });
+  await listen("open-settings", () => void openSettings());
   el("#set-cancel").addEventListener("click", () => void closeSettings());
   el("#set-save").addEventListener("click", async () => {
     try {

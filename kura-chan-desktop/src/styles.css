@@ -25,16 +25,8 @@ body {
   background: transparent;
   overflow: hidden;
   display: flex;
-  align-items: flex-start;
-  justify-content: flex-start;
-}
-/* pet hugs the screen-edge corner; menu falls on the inner side.
-   menu-left → pet on the right; pet-bottom → pet at the bottom. */
-body.menu-left #app {
-  flex-direction: row-reverse;
-}
-body.pet-bottom #app {
-  align-items: flex-end;
+  flex-direction: column;
+  align-items: center;
 }
 
 #stage {
@@ -68,41 +60,33 @@ body.pet-bottom #app {
   }
 }
 
-/* vertical side menu — only visible on hover (window must be focused) */
-#menu {
+/* single listen button, snug under the pet */
+#listen-btn {
   flex: 0 0 auto;
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-  padding: 5px;
-  align-items: center;
-  justify-content: center;
-  opacity: 0;
-  transition: opacity 0.15s;
-}
-body.menu-open #menu {
-  opacity: 1;
-}
-body.dragging #menu {
-  opacity: 0 !important;
-}
-#menu button {
-  width: 28px;
-  height: 28px;
+  margin-top: 2px;
+  width: 34px;
+  height: 34px;
   border: none;
-  border-radius: 9px;
-  background: rgba(40, 40, 48, 0.88);
+  border-radius: 50%;
+  background: rgba(85, 170, 136, 0.92);
   color: #fff;
-  font-size: 14px;
+  font-size: 16px;
   cursor: pointer;
-  backdrop-filter: blur(6px);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  transition: background 0.15s;
 }
-#menu button:hover {
-  background: rgba(60, 60, 72, 0.95);
+#listen-btn:hover {
+  background: rgba(96, 190, 152, 0.96);
 }
-#voice-btn.recording {
+#listen-btn.recording {
   background: rgba(220, 70, 70, 0.95);
   animation: pulse 1s ease-in-out infinite;
+}
+/* hide the button in click-through / chat / settings modes */
+body.ghost #listen-btn,
+body.chat-mode #listen-btn,
+body.settings-open #listen-btn {
+  display: none;
 }
 @keyframes pulse {
   0%,
@@ -112,17 +96,6 @@ body.dragging #menu {
   50% {
     opacity: 0.55;
   }
-}
-.dot {
-  width: 9px;
-  height: 9px;
-  flex: 0 0 auto;
-  border-radius: 50%;
-  background: #e05555;
-  box-shadow: 0 0 4px rgba(0, 0, 0, 0.45);
-}
-.dot.connected {
-  background: #4caf78;
 }
 
 /* subtitle bubble over the pet's upper area */
