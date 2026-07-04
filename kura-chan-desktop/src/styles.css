@@ -87,13 +87,13 @@ body.dragging #menu {
   opacity: 0 !important;
 }
 #menu button {
-  width: 32px;
-  height: 32px;
+  width: 28px;
+  height: 28px;
   border: none;
   border-radius: 9px;
   background: rgba(40, 40, 48, 0.88);
   color: #fff;
-  font-size: 15px;
+  font-size: 14px;
   cursor: pointer;
   backdrop-filter: blur(6px);
 }

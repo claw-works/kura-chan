@@ -18,7 +18,7 @@ let talkTimer: number | undefined;
 const PET_SIZES = [96, 160, 260]; // 小 / 中 / 大 (cycled by one button)
 const PET_RATIO = 0.83;
 const MENU_W = 44; // vertical menu strip width
-const MENU_MIN_H = 170; // min height to fit the vertical menu
+const MENU_MIN_H = 200; // min height to fit the vertical menu (dot + 5 buttons)
 let sizeIdx = 1;
 let chatMode = false;
 let ttsOn = true; // speaker toggle: play TTS audio or not
