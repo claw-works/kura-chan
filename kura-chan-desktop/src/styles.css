@@ -128,24 +128,38 @@ body.dragging #menu {
 /* subtitle bubble over the pet's upper area */
 .bubble {
   position: absolute;
-  top: 4px;
-  left: 4px;
-  max-width: var(--pet-w, 150px);
-  background: rgba(20, 20, 24, 0.8);
-  border-radius: 12px;
-  padding: 6px 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: 6px; /* pet usually in upper area → bubble sits below, off the face */
+  width: max-content;
+  max-width: 94%;
+  background: rgba(30, 30, 38, 0.92);
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 14px;
+  padding: 7px 12px;
   font-size: 13px;
-  line-height: 1.4;
+  line-height: 1.45;
   text-align: center;
-  backdrop-filter: blur(6px);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+  word-break: break-word;
+  backdrop-filter: blur(8px);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
   opacity: 0;
-  transition: opacity 0.2s;
+  transition: opacity 0.18s ease, transform 0.18s ease;
   pointer-events: none;
-  z-index: 5;
+  z-index: 8;
+}
+/* pet hugging the bottom of the screen → put the bubble above it instead */
+body.pet-bottom .bubble {
+  bottom: auto;
+  top: 6px;
 }
 .bubble.show {
   opacity: 1;
+}
+/* click-through mode: dim the pet slightly so it's clear it's non-interactive */
+body.ghost #stage {
+  opacity: 0.55;
 }
 
 /* text input row at the bottom, shown when 💬 is toggled */

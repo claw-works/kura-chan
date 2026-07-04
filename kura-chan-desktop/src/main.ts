@@ -303,6 +303,7 @@ async function init() {
   await listen<any>("sync", (e) => applySync(e.payload));
   // global hotkey: bring to screen, then toggle voice (start / stop-and-send)
   await listen("hotkey", async () => {
+    document.body.classList.remove("ghost"); // exiting click-through
     try {
       await clampToScreen();
     } catch {
@@ -490,6 +491,17 @@ async function init() {
     void applySize();
   });
   el("#settings-btn").addEventListener("click", () => void openSettings());
+  el("#ghost-btn").addEventListener("click", async () => {
+    document.body.classList.remove("menu-open");
+    document.body.classList.add("ghost");
+    try {
+      await invoke("set_click_through", { on: true });
+      setBubble("穿透已开启，按全局热键（默认 ⌘⇧K）唤回小爪");
+    } catch (err) {
+      document.body.classList.remove("ghost");
+      setBubble("穿透失败：" + err);
+    }
+  });
   el("#set-cancel").addEventListener("click", () => void closeSettings());
   el("#set-save").addEventListener("click", async () => {
     try {

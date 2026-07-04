@@ -92,6 +92,14 @@ fn get_window_pos() -> Option<serde_json::Value> {
     serde_json::from_str::<serde_json::Value>(&c).ok()
 }
 
+/// Toggle click-through: when on, the window ignores mouse events so clicks pass
+/// to whatever is underneath (the pet becomes non-interactive — use the global
+/// hotkey to wake it back, which turns this off).
+#[tauri::command]
+fn set_click_through(window: tauri::WebviewWindow, on: bool) -> Result<(), String> {
+    window.set_ignore_cursor_events(on).map_err(|e| e.to_string())
+}
+
 /// Current settings for the settings UI.
 #[tauri::command]
 fn get_settings() -> serde_json::Value {
@@ -227,6 +235,7 @@ pub fn run() {
                     // decide what to do (start/stop voice).
                     if event.state() == ShortcutState::Pressed {
                         if let Some(w) = app.get_webview_window("main") {
+                            let _ = w.set_ignore_cursor_events(false); // leave click-through so it's usable
                             let _ = w.show();
                             let _ = w.unminimize();
                             let _ = w.set_focus();
@@ -285,7 +294,8 @@ pub fn run() {
             get_history,
             get_last_sync,
             save_window_pos,
-            get_window_pos
+            get_window_pos,
+            set_click_through
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
