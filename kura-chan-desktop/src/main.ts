@@ -14,10 +14,9 @@ let currentExpr = "neutral";
 let speaking = false;
 let talkTimer: number | undefined;
 
-// layout: window = pet with a small listen button strip below it.
+// layout: window hugs the pet; a small mic button is overlaid on its bottom.
 const PET_SIZES = [96, 160, 260]; // 小 / 中 / 大
 const PET_RATIO = 0.83;
-const LISTEN_H = 40; // listen button strip height under the pet
 let sizeIdx = 1;
 let chatMode = false;
 let ttsOn = true; // speaker toggle: play TTS audio or not
@@ -35,7 +34,7 @@ function applyDims(): { pw: number; ph: number } {
 async function applySize() {
   const { pw, ph } = applyDims();
   try {
-    await getCurrentWindow().setSize(new LogicalSize(pw, ph + LISTEN_H));
+    await getCurrentWindow().setSize(new LogicalSize(pw, ph));
     await clampToScreen();
   } catch (err) {
     console.error("setSize failed", err);
@@ -45,7 +44,7 @@ async function applySize() {
 async function restoreFloat() {
   const { pw, ph } = applyDims();
   try {
-    await getCurrentWindow().setSize(new LogicalSize(pw, ph + LISTEN_H));
+    await getCurrentWindow().setSize(new LogicalSize(pw, ph));
     if (savedPos) {
       await getCurrentWindow().setPosition(new PhysicalPosition(savedPos.x, savedPos.y));
       savedPos = null;

@@ -60,23 +60,31 @@ body {
   }
 }
 
-/* single listen button, snug under the pet */
+/* small mic button overlaid on the pet's bottom (doesn't add window height) */
 #listen-btn {
-  flex: 0 0 auto;
-  margin-top: 2px;
-  width: 34px;
-  height: 34px;
+  position: absolute;
+  bottom: 3px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 26px;
+  height: 26px;
   border: none;
   border-radius: 50%;
-  background: rgba(85, 170, 136, 0.92);
+  background: rgba(40, 40, 48, 0.82);
   color: #fff;
-  font-size: 16px;
+  font-size: 13px;
+  line-height: 26px;
+  text-align: center;
+  padding: 0;
   cursor: pointer;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
-  transition: background 0.15s;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
+  opacity: 0.9;
+  z-index: 6;
+  transition: background 0.15s, opacity 0.15s;
 }
 #listen-btn:hover {
-  background: rgba(96, 190, 152, 0.96);
+  opacity: 1;
+  background: rgba(60, 60, 72, 0.92);
 }
 #listen-btn.recording {
   background: rgba(220, 70, 70, 0.95);
