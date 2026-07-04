@@ -153,11 +153,45 @@ function setStatus(s: string) {
 const SUBTITLE_MS = 5000;
 let bubbleTimer: number | undefined;
 function setBubble(s: string) {
-  const b = el("#bubble");
-  b.textContent = s;
-  b.classList.toggle("show", !!s);
   if (bubbleTimer) clearTimeout(bubbleTimer);
-  if (s) bubbleTimer = window.setTimeout(() => b.classList.remove("show"), SUBTITLE_MS);
+  if (!s) {
+    void invoke("hide_subtitle");
+    return;
+  }
+  void positionAndShowSubtitle(s);
+  bubbleTimer = window.setTimeout(() => void invoke("hide_subtitle"), SUBTITLE_MS);
+}
+// Position the independent subtitle window above/below the pet, clamped to the
+// screen so it never runs off any of the four corners.
+async function positionAndShowSubtitle(text: string) {
+  const SUB_W = 300;
+  const SUB_H = 90;
+  const GAP = 6;
+  try {
+    const win = getCurrentWindow();
+    const [pos, size, sf, mon] = await Promise.all([
+      win.outerPosition(),
+      win.outerSize(),
+      win.scaleFactor(),
+      currentMonitor(),
+    ]);
+    const msf = mon?.scaleFactor || sf;
+    const subW = Math.round(SUB_W * msf);
+    const subH = Math.round(SUB_H * msf);
+    const gap = Math.round(GAP * msf);
+    let x = Math.round(pos.x + size.width / 2 - subW / 2); // center over pet
+    // pet in upper half → subtitle below it; lower half → above it
+    const petCY = pos.y + size.height / 2;
+    const scCY = mon ? mon.position.y + mon.size.height / 2 : petCY;
+    let y = petCY < scCY ? pos.y + size.height + gap : pos.y - subH - gap;
+    if (mon) {
+      x = Math.max(mon.position.x, Math.min(x, mon.position.x + mon.size.width - subW));
+      y = Math.max(mon.position.y, Math.min(y, mon.position.y + mon.size.height - subH));
+    }
+    await invoke("show_subtitle", { text, x, y });
+  } catch (err) {
+    console.error("subtitle position failed", err);
+  }
 }
 function label(s: string): string {
   if (s === "connected") return "已连接";

@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="zh">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>kura subtitle</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: transparent;
+        overflow: hidden;
+      }
+      #wrap {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        height: 100vh;
+        padding: 4px;
+        box-sizing: border-box;
+      }
+      #b {
+        max-width: 96%;
+        background: rgba(30, 30, 38, 0.94);
+        color: #fff;
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        border-radius: 14px;
+        padding: 8px 13px;
+        font: 13px/1.45 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+        text-align: center;
+        word-break: break-word;
+        box-shadow: 0 6px 22px rgba(0, 0, 0, 0.4);
+        backdrop-filter: blur(8px);
+        opacity: 0;
+        transition: opacity 0.18s ease;
+      }
+      #b.show {
+        opacity: 1;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="wrap"><div id="b"></div></div>
+    <script type="module">
+      import { listen } from "@tauri-apps/api/event";
+      const b = document.getElementById("b");
+      listen("subtitle-text", (e) => {
+        const t = (e.payload ?? "").toString();
+        b.textContent = t;
+        b.classList.toggle("show", t.length > 0);
+      });
+    </script>
+  </body>
+</html>

@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use audio::Recorder;
 use serde_json::json;
-use tauri::{Emitter, Manager, State};
+use tauri::{Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 use ws::{WsHandle, WsOut};
 
@@ -98,6 +98,24 @@ fn get_window_pos() -> Option<serde_json::Value> {
 #[tauri::command]
 fn set_click_through(window: tauri::WebviewWindow, on: bool) -> Result<(), String> {
     window.set_ignore_cursor_events(on).map_err(|e| e.to_string())
+}
+
+/// Position (physical px) and show the independent subtitle window with `text`.
+#[tauri::command]
+fn show_subtitle(app: tauri::AppHandle, text: String, x: i32, y: i32) -> Result<(), String> {
+    if let Some(w) = app.get_webview_window("subtitle") {
+        let _ = w.set_position(tauri::PhysicalPosition::new(x, y));
+        let _ = app.emit_to("subtitle", "subtitle-text", text);
+        let _ = w.show();
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn hide_subtitle(app: tauri::AppHandle) {
+    if let Some(w) = app.get_webview_window("subtitle") {
+        let _ = w.hide();
+    }
 }
 
 /// Current settings for the settings UI.
@@ -268,6 +286,27 @@ pub fn run() {
                 Err(e) => eprintln!("[hotkey] invalid shortcut '{hotkey}': {e}"),
             }
 
+            // Independent subtitle window: transparent, click-through, on-top,
+            // hidden until show_subtitle positions and reveals it. Lets speech
+            // subtitles / proactive messages float outside the (tiny) pet window.
+            if let Ok(sub) = WebviewWindowBuilder::new(
+                app,
+                "subtitle",
+                WebviewUrl::App("subtitle.html".into()),
+            )
+            .transparent(true)
+            .decorations(false)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .focused(false)
+            .visible(false)
+            .shadow(false)
+            .inner_size(300.0, 90.0)
+            .build()
+            {
+                let _ = sub.set_ignore_cursor_events(true);
+            }
+
             // status-bar tray icon with a quit menu
             let quit = tauri::menu::MenuItem::with_id(app, "quit", "退出小爪", true, None::<&str>)?;
             let menu = tauri::menu::Menu::with_items(app, &[&quit])?;
@@ -295,7 +334,9 @@ pub fn run() {
             get_last_sync,
             save_window_pos,
             get_window_pos,
-            set_click_through
+            set_click_through,
+            show_subtitle,
+            hide_subtitle
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
