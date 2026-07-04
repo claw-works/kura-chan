@@ -277,8 +277,7 @@ pub fn run() {
                             let _ = w.unminimize();
                             let _ = w.set_focus();
                         }
-                        apply_click_through(app, false); // leave click-through so it's usable
-                        let _ = app.emit("hotkey", ());
+                        let _ = app.emit("hotkey", ()); // pure listen, leaves click-through as-is
                     }
                 })
                 .build(),
@@ -351,8 +350,7 @@ pub fn run() {
                         "quit" => app.exit(0),
                         "listen" => {
                             focus(app);
-                            apply_click_through(app, false);
-                            let _ = app.emit("hotkey", ()); // reuse: toggle voice
+                            let _ = app.emit("hotkey", ()); // pure listen
                         }
                         "chat" => {
                             focus(app);
