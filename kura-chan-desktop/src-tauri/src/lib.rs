@@ -3,6 +3,8 @@ mod ws;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use audio::Recorder;
 use serde_json::json;
@@ -95,9 +97,27 @@ fn get_window_pos() -> Option<serde_json::Value> {
 /// Toggle click-through: when on, the window ignores mouse events so clicks pass
 /// to whatever is underneath (the pet becomes non-interactive — use the global
 /// hotkey to wake it back, which turns this off).
+/// Shared click-through state (tray / 👻 button / hotkey all toggle this one).
+struct ClickThrough(Arc<AtomicBool>);
+
+/// Apply click-through on the main window, update shared state, and tell the
+/// frontend (so it can dim / undim the pet).
+fn apply_click_through(app: &tauri::AppHandle, on: bool) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.set_ignore_cursor_events(on);
+    }
+    if let Some(st) = app.try_state::<ClickThrough>() {
+        st.0.store(on, Ordering::Relaxed);
+    }
+    let _ = app.emit("click-through", on);
+}
+
+/// Toggle click-through: when on, the window ignores mouse events so clicks pass
+/// to whatever is underneath. Use tray / hotkey to turn it back off.
 #[tauri::command]
-fn set_click_through(window: tauri::WebviewWindow, on: bool) -> Result<(), String> {
-    window.set_ignore_cursor_events(on).map_err(|e| e.to_string())
+fn set_click_through(app: tauri::AppHandle, on: bool) -> Result<(), String> {
+    apply_click_through(&app, on);
+    Ok(())
 }
 
 /// Position (physical px) and show the independent subtitle window with `text`.
@@ -253,11 +273,11 @@ pub fn run() {
                     // decide what to do (start/stop voice).
                     if event.state() == ShortcutState::Pressed {
                         if let Some(w) = app.get_webview_window("main") {
-                            let _ = w.set_ignore_cursor_events(false); // leave click-through so it's usable
                             let _ = w.show();
                             let _ = w.unminimize();
                             let _ = w.set_focus();
                         }
+                        apply_click_through(app, false); // leave click-through so it's usable
                         let _ = app.emit("hotkey", ());
                     }
                 })
@@ -276,6 +296,7 @@ pub fn run() {
             );
             app.manage(handle);
             app.manage(Recorder::new());
+            app.manage(ClickThrough(Arc::new(AtomicBool::new(false))));
 
             // Global hotkey (default Cmd/Ctrl+Shift+K): wake + voice from anywhere.
             match hotkey.parse::<tauri_plugin_global_shortcut::Shortcut>() {
@@ -307,15 +328,48 @@ pub fn run() {
                 let _ = sub.set_ignore_cursor_events(true);
             }
 
-            // status-bar tray icon with a quit menu
-            let quit = tauri::menu::MenuItem::with_id(app, "quit", "退出小爪", true, None::<&str>)?;
-            let menu = tauri::menu::Menu::with_items(app, &[&quit])?;
+            // status-bar tray icon with an action menu
+            use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+            let listen_it = MenuItem::with_id(app, "listen", "开始聆听    ⌘⇧K", true, None::<&str>)?;
+            let chat_it = MenuItem::with_id(app, "chat", "打开聊天窗口", true, None::<&str>)?;
+            let ct_it = MenuItem::with_id(app, "toggle_ct", "切换穿透模式", true, None::<&str>)?;
+            let sep = PredefinedMenuItem::separator(app)?;
+            let quit = MenuItem::with_id(app, "quit", "退出小爪", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&listen_it, &chat_it, &ct_it, &sep, &quit])?;
             let _tray = tauri::tray::TrayIconBuilder::new()
                 .icon(app.default_window_icon().unwrap().clone())
                 .menu(&menu)
                 .on_menu_event(|app, event| {
-                    if event.id.as_ref() == "quit" {
-                        app.exit(0);
+                    let focus = |app: &tauri::AppHandle| {
+                        if let Some(w) = app.get_webview_window("main") {
+                            let _ = w.show();
+                            let _ = w.unminimize();
+                            let _ = w.set_focus();
+                        }
+                    };
+                    match event.id.as_ref() {
+                        "quit" => app.exit(0),
+                        "listen" => {
+                            focus(app);
+                            apply_click_through(app, false);
+                            let _ = app.emit("hotkey", ()); // reuse: toggle voice
+                        }
+                        "chat" => {
+                            focus(app);
+                            apply_click_through(app, false);
+                            let _ = app.emit("open-chat", ());
+                        }
+                        "toggle_ct" => {
+                            let cur = app
+                                .try_state::<ClickThrough>()
+                                .map(|s| s.0.load(Ordering::Relaxed))
+                                .unwrap_or(false);
+                            if cur {
+                                focus(app);
+                            }
+                            apply_click_through(app, !cur);
+                        }
+                        _ => {}
                     }
                 })
                 .build(app)?;

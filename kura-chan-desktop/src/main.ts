@@ -337,7 +337,6 @@ async function init() {
   await listen<any>("sync", (e) => applySync(e.payload));
   // global hotkey: bring to screen, then toggle voice (start / stop-and-send)
   await listen("hotkey", async () => {
-    document.body.classList.remove("ghost"); // exiting click-through
     try {
       await clampToScreen();
     } catch {
@@ -346,6 +345,12 @@ async function init() {
     if (recording) await stopVoice();
     else await startVoice();
   });
+  // click-through state (tray / 👻 / hotkey) → dim the pet accordingly
+  await listen<boolean>("click-through", (e) => {
+    document.body.classList.toggle("ghost", !!e.payload);
+  });
+  // tray "打开聊天窗口"
+  await listen("open-chat", () => void enterChat());
   await listen<any>("response", (e) => {
     const m = e.payload?.emotion;
     if (typeof m === "string" && m) {
@@ -527,12 +532,10 @@ async function init() {
   el("#settings-btn").addEventListener("click", () => void openSettings());
   el("#ghost-btn").addEventListener("click", async () => {
     document.body.classList.remove("menu-open");
-    document.body.classList.add("ghost");
     try {
       await invoke("set_click_through", { on: true });
-      setBubble("穿透已开启，按全局热键（默认 ⌘⇧K）唤回小爪");
+      setBubble("穿透已开启，按 ⌘⇧K 或状态栏菜单唤回小爪");
     } catch (err) {
-      document.body.classList.remove("ghost");
       setBubble("穿透失败：" + err);
     }
   });
