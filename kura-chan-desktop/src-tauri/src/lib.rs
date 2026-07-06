@@ -389,7 +389,11 @@ pub fn run() {
                         _ => {}
                     }
                 })
-                .build(app)?;
+                .build(app);
+            match &_tray {
+                Ok(_) => eprintln!("[tray] created"),
+                Err(e) => eprintln!("[tray] build FAILED: {e}"),
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
