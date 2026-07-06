@@ -492,6 +492,11 @@ async function init() {
     if (!recording) void startVoice();
     else void stopVoice();
   });
+  // right-click the pet → native action menu (not clipped by the small window)
+  window.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    void invoke("show_context_menu");
+  });
   // tray-driven actions: size submenu / settings
   await listen<number>("set-size", (e) => {
     const i = Number(e.payload);

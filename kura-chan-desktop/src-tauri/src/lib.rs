@@ -140,6 +140,79 @@ fn hide_subtitle(app: tauri::AppHandle) {
     }
 }
 
+/// Build the shared action menu (used by both the tray and the right-click menu).
+fn build_action_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
+    let listen_it = MenuItem::with_id(app, "listen", "开始聆听    ⌘⇧K", true, None::<&str>)?;
+    let chat_it = MenuItem::with_id(app, "chat", "打开聊天窗口", true, None::<&str>)?;
+    let size_s = MenuItem::with_id(app, "size_0", "小", true, None::<&str>)?;
+    let size_m = MenuItem::with_id(app, "size_1", "中", true, None::<&str>)?;
+    let size_l = MenuItem::with_id(app, "size_2", "大", true, None::<&str>)?;
+    let size_menu = Submenu::with_items(app, "大小", true, &[&size_s, &size_m, &size_l])?;
+    let settings_it = MenuItem::with_id(app, "settings", "设置…", true, None::<&str>)?;
+    let ct_it = MenuItem::with_id(app, "toggle_ct", "切换穿透模式  ⌘⇧G", true, None::<&str>)?;
+    let sep = PredefinedMenuItem::separator(app)?;
+    let quit = MenuItem::with_id(app, "quit", "退出小爪", true, None::<&str>)?;
+    Menu::with_items(
+        app,
+        &[&listen_it, &chat_it, &size_menu, &settings_it, &ct_it, &sep, &quit],
+    )
+}
+
+/// Handle a menu selection (shared by tray and right-click menu).
+fn handle_menu_event(app: &tauri::AppHandle, id: &str) {
+    let focus = |app: &tauri::AppHandle| {
+        if let Some(w) = app.get_webview_window("main") {
+            let _ = w.show();
+            let _ = w.unminimize();
+            let _ = w.set_focus();
+        }
+    };
+    match id {
+        "quit" => app.exit(0),
+        "listen" => {
+            focus(app);
+            let _ = app.emit("hotkey", ());
+        }
+        "chat" => {
+            focus(app);
+            apply_click_through(app, false);
+            let _ = app.emit("open-chat", ());
+        }
+        "settings" => {
+            focus(app);
+            apply_click_through(app, false);
+            let _ = app.emit("open-settings", ());
+        }
+        "toggle_ct" => {
+            let cur = app
+                .try_state::<ClickThrough>()
+                .map(|s| s.0.load(Ordering::Relaxed))
+                .unwrap_or(false);
+            if cur {
+                focus(app);
+            }
+            apply_click_through(app, !cur);
+        }
+        s if s.starts_with("size_") => {
+            if let Ok(idx) = s[5..].parse::<u32>() {
+                let _ = app.emit("set-size", idx);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Pop up the native action menu at the cursor (right-click on the pet). Native
+/// menu isn't clipped by the tiny pet window.
+#[tauri::command]
+fn show_context_menu(app: tauri::AppHandle, window: tauri::Window) -> Result<(), String> {
+    use tauri::menu::ContextMenu;
+    let menu = build_action_menu(&app).map_err(|e| e.to_string())?;
+    menu.popup(window).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// Current settings for the settings UI.
 #[tauri::command]
 fn get_settings() -> serde_json::Value {
@@ -269,6 +342,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .on_menu_event(|app, event| handle_menu_event(app, event.id.as_ref()))
         .setup(|app| {
             // Connection config from ~/.kura/.env (falls back to env / defaults).
             let s = load_settings();
@@ -342,68 +416,12 @@ pub fn run() {
                 let _ = sub.set_ignore_cursor_events(true);
             }
 
-            // status-bar tray icon with an action menu
-            use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
-            let listen_it = MenuItem::with_id(app, "listen", "开始聆听    ⌘⇧K", true, None::<&str>)?;
-            let chat_it = MenuItem::with_id(app, "chat", "打开聊天窗口", true, None::<&str>)?;
-            let size_s = MenuItem::with_id(app, "size_0", "小", true, None::<&str>)?;
-            let size_m = MenuItem::with_id(app, "size_1", "中", true, None::<&str>)?;
-            let size_l = MenuItem::with_id(app, "size_2", "大", true, None::<&str>)?;
-            let size_menu = Submenu::with_items(app, "大小", true, &[&size_s, &size_m, &size_l])?;
-            let settings_it = MenuItem::with_id(app, "settings", "设置…", true, None::<&str>)?;
-            let ct_it = MenuItem::with_id(app, "toggle_ct", "切换穿透模式", true, None::<&str>)?;
-            let sep = PredefinedMenuItem::separator(app)?;
-            let quit = MenuItem::with_id(app, "quit", "退出小爪", true, None::<&str>)?;
-            let menu = Menu::with_items(
-                app,
-                &[&listen_it, &chat_it, &size_menu, &settings_it, &ct_it, &sep, &quit],
-            )?;
+            // status-bar tray icon (uses the shared action menu)
+            let menu = build_action_menu(app.handle())?;
             let _tray = tauri::tray::TrayIconBuilder::new()
                 .icon(app.default_window_icon().unwrap().clone())
                 .menu(&menu)
-                .on_menu_event(|app, event| {
-                    let focus = |app: &tauri::AppHandle| {
-                        if let Some(w) = app.get_webview_window("main") {
-                            let _ = w.show();
-                            let _ = w.unminimize();
-                            let _ = w.set_focus();
-                        }
-                    };
-                    let id = event.id.as_ref();
-                    match id {
-                        "quit" => app.exit(0),
-                        "listen" => {
-                            focus(app);
-                            let _ = app.emit("hotkey", ()); // pure listen
-                        }
-                        "chat" => {
-                            focus(app);
-                            apply_click_through(app, false);
-                            let _ = app.emit("open-chat", ());
-                        }
-                        "settings" => {
-                            focus(app);
-                            apply_click_through(app, false);
-                            let _ = app.emit("open-settings", ());
-                        }
-                        "toggle_ct" => {
-                            let cur = app
-                                .try_state::<ClickThrough>()
-                                .map(|s| s.0.load(Ordering::Relaxed))
-                                .unwrap_or(false);
-                            if cur {
-                                focus(app);
-                            }
-                            apply_click_through(app, !cur);
-                        }
-                        s if s.starts_with("size_") => {
-                            if let Ok(idx) = s[5..].parse::<u32>() {
-                                let _ = app.emit("set-size", idx);
-                            }
-                        }
-                        _ => {}
-                    }
-                })
+                .on_menu_event(|app, event| handle_menu_event(app, event.id.as_ref()))
                 .build(app);
             match &_tray {
                 Ok(_) => eprintln!("[tray] created"),
@@ -426,7 +444,8 @@ pub fn run() {
             get_window_pos,
             set_click_through,
             show_subtitle,
-            hide_subtitle
+            hide_subtitle,
+            show_context_menu
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
