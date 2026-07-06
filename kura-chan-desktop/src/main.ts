@@ -326,7 +326,7 @@ async function init() {
   await listen<boolean>("click-through", (e) => {
     const on = !!e.payload;
     document.body.classList.toggle("ghost", on);
-    if (on) setBubble("已进入壁纸模式，按 ⌘⇧G 退出");
+    if (on) setBubble("已进入幽灵模式，按 ⌘⇧G 退出");
   });
   // tray "打开聊天窗口"
   await listen("open-chat", () => void enterChat());

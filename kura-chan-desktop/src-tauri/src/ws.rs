@@ -32,6 +32,7 @@ pub struct WsHandle {
 }
 
 fn set_status(app: &AppHandle, status: &Arc<StdMutex<String>>, value: &str) {
+    eprintln!("[ws] {value}");
     if let Ok(mut s) = status.lock() {
         *s = value.to_string();
     }
