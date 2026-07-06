@@ -106,7 +106,12 @@ struct ClickThrough(Arc<AtomicBool>);
 /// frontend (so it can dim / undim the pet).
 fn apply_click_through(app: &tauri::AppHandle, on: bool) {
     if let Some(w) = app.get_webview_window("main") {
-        let _ = w.set_ignore_cursor_events(on);
+        match w.set_ignore_cursor_events(on) {
+            Ok(()) => eprintln!("[ghost] click-through = {on}"),
+            Err(e) => eprintln!("[ghost] set_ignore_cursor_events failed: {e}"),
+        }
+    } else {
+        eprintln!("[ghost] no main window found");
     }
     if let Some(st) = app.try_state::<ClickThrough>() {
         st.0.store(on, Ordering::Relaxed);
