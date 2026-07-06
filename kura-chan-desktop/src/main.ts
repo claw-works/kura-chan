@@ -322,9 +322,11 @@ async function init() {
     if (recording) await stopVoice();
     else await startVoice();
   });
-  // click-through state (tray / 👻 / hotkey) → dim the pet accordingly
+  // click-through state (tray / hotkey) → dim the pet accordingly
   await listen<boolean>("click-through", (e) => {
-    document.body.classList.toggle("ghost", !!e.payload);
+    const on = !!e.payload;
+    document.body.classList.toggle("ghost", on);
+    if (on) setBubble("已进入壁纸模式，按 ⌘⇧G 退出");
   });
   // tray "打开聊天窗口"
   await listen("open-chat", () => void enterChat());

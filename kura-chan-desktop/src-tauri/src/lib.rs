@@ -150,7 +150,7 @@ fn build_action_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<
     let size_l = MenuItem::with_id(app, "size_2", "大", true, None::<&str>)?;
     let size_menu = Submenu::with_items(app, "大小", true, &[&size_s, &size_m, &size_l])?;
     let settings_it = MenuItem::with_id(app, "settings", "设置…", true, None::<&str>)?;
-    let ct_it = MenuItem::with_id(app, "toggle_ct", "切换穿透模式  ⌘⇧G", true, None::<&str>)?;
+    let ct_it = MenuItem::with_id(app, "toggle_ct", "壁纸模式（点击穿透）  ⌘⇧G", true, None::<&str>)?;
     let sep = PredefinedMenuItem::separator(app)?;
     let quit = MenuItem::with_id(app, "quit", "退出小爪", true, None::<&str>)?;
     Menu::with_items(
