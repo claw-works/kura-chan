@@ -426,7 +426,6 @@ pub fn run() {
             let _tray = tauri::tray::TrayIconBuilder::new()
                 .icon(app.default_window_icon().unwrap().clone())
                 .menu(&menu)
-                .on_menu_event(|app, event| handle_menu_event(app, event.id.as_ref()))
                 .build(app);
             match &_tray {
                 Ok(_) => eprintln!("[tray] created"),
