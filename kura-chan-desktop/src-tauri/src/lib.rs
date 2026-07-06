@@ -42,6 +42,7 @@ struct Settings {
     api_key: String,
     device_id: String,
     hotkey: String,
+    hotkey_ghost: String,
 }
 /// Resolve settings: ~/.kura/.env > process env > built-in default.
 fn load_settings() -> Settings {
@@ -59,6 +60,7 @@ fn load_settings() -> Settings {
         api_key: get("KURA_API_KEY", ""),
         device_id: get("KURA_DEVICE_ID", "KURA_DESKTOP_001"),
         hotkey: get("KURA_HOTKEY", "CmdOrCtrl+Shift+K"),
+        hotkey_ghost: get("KURA_HOTKEY_GHOST", "CmdOrCtrl+Shift+G"),
     }
 }
 
@@ -266,26 +268,12 @@ fn read_dropped(path: String) -> Result<String, String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .plugin(
-            tauri_plugin_global_shortcut::Builder::new()
-                .with_handler(|app, _shortcut, event| {
-                    // On key-down: bring the window forward and let the frontend
-                    // decide what to do (start/stop voice).
-                    if event.state() == ShortcutState::Pressed {
-                        if let Some(w) = app.get_webview_window("main") {
-                            let _ = w.show();
-                            let _ = w.unminimize();
-                            let _ = w.set_focus();
-                        }
-                        let _ = app.emit("hotkey", ()); // pure listen, leaves click-through as-is
-                    }
-                })
-                .build(),
-        )
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup(|app| {
             // Connection config from ~/.kura/.env (falls back to env / defaults).
             let s = load_settings();
             let hotkey = s.hotkey.clone();
+            let hotkey_ghost = s.hotkey_ghost.clone();
             let handle = ws::connect(
                 app.handle().clone(),
                 s.ws_url,
@@ -297,13 +285,40 @@ pub fn run() {
             app.manage(Recorder::new());
             app.manage(ClickThrough(Arc::new(AtomicBool::new(false))));
 
-            // Global hotkey (default Cmd/Ctrl+Shift+K): wake + voice from anywhere.
-            match hotkey.parse::<tauri_plugin_global_shortcut::Shortcut>() {
-                Ok(sc) => match app.global_shortcut().register(sc) {
-                    Ok(()) => eprintln!("[hotkey] registered: {hotkey}"),
-                    Err(e) => eprintln!("[hotkey] register failed: {e}"),
-                },
-                Err(e) => eprintln!("[hotkey] invalid shortcut '{hotkey}': {e}"),
+            // Global hotkeys: listen (default ⌘⇧K) + toggle click-through (⌘⇧G).
+            if let Ok(sc) = hotkey.parse::<tauri_plugin_global_shortcut::Shortcut>() {
+                let _ = app.global_shortcut().on_shortcut(sc, |app, _sc, event| {
+                    if event.state() == ShortcutState::Pressed {
+                        if let Some(w) = app.get_webview_window("main") {
+                            let _ = w.show();
+                            let _ = w.unminimize();
+                            let _ = w.set_focus();
+                        }
+                        let _ = app.emit("hotkey", ()); // pure listen
+                    }
+                });
+                eprintln!("[hotkey] listen: {hotkey}");
+            } else {
+                eprintln!("[hotkey] invalid listen shortcut '{hotkey}'");
+            }
+            if let Ok(sc) = hotkey_ghost.parse::<tauri_plugin_global_shortcut::Shortcut>() {
+                let _ = app.global_shortcut().on_shortcut(sc, |app, _sc, event| {
+                    if event.state() == ShortcutState::Pressed {
+                        let cur = app
+                            .try_state::<ClickThrough>()
+                            .map(|s| s.0.load(Ordering::Relaxed))
+                            .unwrap_or(false);
+                        if cur {
+                            if let Some(w) = app.get_webview_window("main") {
+                                let _ = w.set_focus();
+                            }
+                        }
+                        apply_click_through(app, !cur);
+                    }
+                });
+                eprintln!("[hotkey] toggle-ghost: {hotkey_ghost}");
+            } else {
+                eprintln!("[hotkey] invalid ghost shortcut '{hotkey_ghost}'");
             }
 
             // Independent subtitle window: transparent, click-through, on-top,
