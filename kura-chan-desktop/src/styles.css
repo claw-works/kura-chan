@@ -50,6 +50,38 @@ body {
 .face {
   pointer-events: none;
 }
+/* offline placeholder: shown instead of the (broken) portrait when disconnected */
+#offline-tip {
+  display: none;
+  position: absolute;
+  inset: 0;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  text-align: center;
+  pointer-events: none;
+}
+#offline-tip .paw {
+  font-size: 30px;
+  opacity: 0.7;
+  animation: pulse 1.4s ease-in-out infinite;
+}
+#offline-tip .txt {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.9);
+  background: rgba(30, 30, 38, 0.88);
+  padding: 3px 9px;
+  border-radius: 9px;
+  backdrop-filter: blur(6px);
+}
+body.offline #offline-tip {
+  display: flex;
+}
+body.offline .portrait,
+body.offline .face {
+  display: none;
+}
 @keyframes breathe {
   0%,
   100% {

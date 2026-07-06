@@ -120,11 +120,14 @@ function el(sel: string): HTMLElement {
   return document.querySelector(sel)!;
 }
 function setStatus(s: string) {
-  // no status dot anymore; reflect connection on the listen button
+  const online = s === "connected";
+  document.body.classList.toggle("offline", !online);
+  const txt = document.querySelector("#offline-tip .txt");
+  if (txt) txt.textContent = online ? "" : label(s);
   const b = document.getElementById("listen-btn");
   if (b) {
-    b.classList.toggle("offline", s !== "connected");
-    b.setAttribute("title", s === "connected" ? "聆听（说完自动发送）" : label(s));
+    b.classList.toggle("offline", !online);
+    b.setAttribute("title", online ? "聆听（说完自动发送）" : label(s));
   }
 }
 const SUBTITLE_MS = 5000;
@@ -246,7 +249,13 @@ function loadPortrait() {
   if (a.glasses === true) p.set("glasses", "1");
   p.set("face", "none");
   p.set("t", String(Date.now()));
-  img.onerror = () => console.error("[portrait] load failed:", img.src);
+  img.onerror = () => {
+    console.error("[portrait] load failed:", img.src);
+    img.style.visibility = "hidden"; // avoid broken-image icon
+  };
+  img.onload = () => {
+    img.style.visibility = "visible";
+  };
   img.src = `${httpBase}/assets/composite_png/${gender}?${p.toString()}`;
   setFace(currentExpr);
 }
