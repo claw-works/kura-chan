@@ -508,6 +508,14 @@ async function init() {
     e.preventDefault();
     void invoke("show_context_menu");
   });
+  // block select-all (Cmd/Ctrl+A) outside text inputs — avoids the selection tint
+  window.addEventListener("keydown", (e) => {
+    const t = e.target as HTMLElement | null;
+    const inInput = !!t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA");
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "a" && !inInput) {
+      e.preventDefault();
+    }
+  });
   // tray-driven actions: size submenu / settings
   await listen<number>("set-size", (e) => {
     const i = Number(e.payload);
