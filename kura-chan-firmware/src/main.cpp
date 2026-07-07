@@ -12,6 +12,7 @@
 #include "SCSCL.h"
 #include <math.h>
 #include "pet/pet.h"
+#include "camera/camera.h"
 
 // ===================== Hardware: servo (SCS bus) + RGB LED (PY32) =====================
 namespace hw {
@@ -515,6 +516,7 @@ static void sendHello() {
     caps.add("led");
     caps.add("face");
     caps.add("battery");
+    caps.add("camera");
     String json;
     serializeJson(doc, json);
     webSocket.sendTXT(json);
@@ -649,6 +651,49 @@ static void finish_listening(bool send, uint32_t now_ms) {
     }
 }
 
+// Send a tool_result carrying a (potentially large) base64 JPEG. Built by hand
+// straight into one PSRAM buffer and sent as a single WS text frame — avoids the
+// double-copy an ArduinoJson document + serialize would cost for a ~100KB image.
+// (WebSocketsClient sends large frames in place: header first, then payload, no
+// duplication.) call_id is a safe agent token, so no JSON escaping is needed.
+static void send_photo_result(const char* call_id, const char* b64, size_t b64len) {
+    static const char P1[] = "{\"type\":\"tool_result\",\"call_id\":\"";
+    static const char P2[] = "\",\"status\":\"ok\",\"result\":{\"image\":\"";
+    static const char P3[] = "\"}}";
+    size_t idlen = strlen(call_id);
+    size_t total = (sizeof P1 - 1) + idlen + (sizeof P2 - 1) + b64len + (sizeof P3 - 1);
+    char* buf = (char*)heap_caps_malloc(total + 1, MALLOC_CAP_SPIRAM);
+    if (!buf) {
+        Serial.println("[CAM] result buffer alloc failed");
+        // Fall back to a small error result so the agent turn doesn't hang.
+        JsonDocument res;
+        res["type"] = "tool_result";
+        res["call_id"] = call_id;
+        res["status"] = "error";
+        res["result"]["message"] = "device out of memory";
+        String out; serializeJson(res, out); webSocket.sendTXT(out);
+        return;
+    }
+    char* w = buf;
+    memcpy(w, P1, sizeof P1 - 1); w += sizeof P1 - 1;
+    memcpy(w, call_id, idlen);    w += idlen;
+    memcpy(w, P2, sizeof P2 - 1); w += sizeof P2 - 1;
+    memcpy(w, b64, b64len);       w += b64len;
+    memcpy(w, P3, sizeof P3 - 1); w += sizeof P3 - 1;
+    *w = 0;
+    webSocket.sendTXT((uint8_t*)buf, total);
+    free(buf);
+}
+
+static void send_tool_error(const char* call_id, const char* message) {
+    JsonDocument res;
+    res["type"] = "tool_result";
+    res["call_id"] = call_id ? call_id : "";
+    res["status"] = "error";
+    res["result"]["message"] = message;
+    String out; serializeJson(res, out); webSocket.sendTXT(out);
+}
+
 static void handleServerJson(uint8_t* payload, size_t length) {
     JsonDocument doc;
     if (deserializeJson(doc, payload, length)) return;
@@ -721,6 +766,20 @@ static void handleServerJson(uint8_t* payload, size_t length) {
         }
     } else if (strcmp(type, "tool_call") == 0) {
         const char* call_id = doc["call_id"];
+        const char* tool = doc["tool"];
+        if (tool && strcmp(tool, "capture_photo") == 0) {
+            Serial.println("[CAM] capture_photo requested");
+            size_t b64len = 0;
+            char* b64 = cam::capture_jpeg_base64(&b64len);
+            if (b64) {
+                send_photo_result(call_id ? call_id : "", b64, b64len);
+                free(b64);
+            } else {
+                send_tool_error(call_id, "camera capture failed");
+            }
+            return;
+        }
+        // Unknown/no-op device tool: acknowledge with an empty ok result.
         JsonDocument res;
         res["type"] = "tool_result";
         res["call_id"] = call_id ? call_id : "";
