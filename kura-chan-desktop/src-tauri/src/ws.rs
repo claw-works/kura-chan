@@ -168,6 +168,7 @@ fn handle_server_text(app: &AppHandle, text: &str, last_sync: &Arc<StdMutex<Opti
             if let Ok(mut ls) = last_sync.lock() {
                 *ls = Some(text.to_string());
             }
+            eprintln!("[sync] {}", &text[..text.len().min(400)]);
             let _ = app.emit("sync", &v);
         }
         "response" => { let _ = app.emit("response", &v); }
