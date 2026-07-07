@@ -465,11 +465,15 @@ async fn run_turn(
         send_event(tx, sync_msg(actor, full, growth.xp_base)).await;
         if full {
             // appearance changed → also push to this actor's OTHER online devices
-            // (e.g. firmware changed outfit → desktop should follow, and vice versa)
-            for dev in state.registry.devices_for_actor(&actor.actor_id) {
-                if dev != device_id {
-                    state.registry.push(&dev, sync_msg(actor, true, growth.xp_base));
-                }
+            let others: Vec<String> = state
+                .registry
+                .devices_for_actor(&actor.actor_id)
+                .into_iter()
+                .filter(|d| d != device_id)
+                .collect();
+            tracing::info!(actor = %actor.actor_id, ?others, appearance = %actor.appearance, "broadcast appearance sync");
+            for dev in &others {
+                state.registry.push(dev, sync_msg(actor, true, growth.xp_base));
             }
         }
     }
