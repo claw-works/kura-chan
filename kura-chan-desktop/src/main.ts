@@ -237,14 +237,17 @@ function loadPortrait() {
   const a = appearance || {};
   const p = new URLSearchParams();
   p.set("h", "480");
-  const hairBack = variant(a.hair_back, "hair_back") || "short_black";
-  const hairFront = variant(a.hair_front, "hair_front") || hairBack;
+  // appearance keys vary: server/[do:wear] use hair_back/costume, firmware-reported
+  // ones use hairback/hairfront/blushvar (full filenames). variant() handles both.
+  const hairBack = variant(a.hair_back ?? a.hairback, "hair_back") || "short_black";
+  const hairFront = variant(a.hair_front ?? a.hairfront, "hair_front") || hairBack;
   const costume = variant(a.costume, "costume") || "jacket";
   p.set("hair_back", hairBack);
   p.set("hair_front", hairFront);
   p.set("costume", costume);
   if (a.blush === true || (typeof a.blush === "string" && a.blush)) {
-    p.set("blush", typeof a.blush === "string" ? variant(a.blush, "blush") || "faint" : "faint");
+    const bv = typeof a.blush === "string" ? variant(a.blush, "blush") : variant(a.blushvar, "blush");
+    p.set("blush", bv || "faint");
   }
   if (a.glasses === true) p.set("glasses", "1");
   p.set("face", "none");
