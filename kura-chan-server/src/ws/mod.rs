@@ -474,6 +474,44 @@ async fn run_turn(
             tracing::info!(actor = %actor.actor_id, ?others, appearance = %actor.appearance, "broadcast appearance sync");
             for dev in &others {
                 state.registry.push(dev, sync_msg(actor, true, growth.xp_base));
+                // Replay this turn's appearance controls: firmware applies ControlMessage
+                // (pet::wear) reliably, whereas its sync/applyAppearance matching differs.
+                for (k, v) in &appearance_ops {
+                    let ctrl = match k.as_str() {
+                        "wear" => ControlMessage {
+                            action: "wear".into(),
+                            value: None,
+                            color: None,
+                            dir: None,
+                            name: v.as_str().map(str::to_string),
+                        },
+                        "bg" => ControlMessage {
+                            action: "bg".into(),
+                            value: None,
+                            color: None,
+                            dir: None,
+                            name: v.as_str().map(str::to_string),
+                        },
+                        "blush" => ControlMessage {
+                            action: "blush".into(),
+                            value: Some(if v.as_bool().unwrap_or(false) { 1 } else { 0 }),
+                            color: None,
+                            dir: None,
+                            name: None,
+                        },
+                        "glasses" => ControlMessage {
+                            action: "glasses".into(),
+                            value: Some(if v.as_bool().unwrap_or(false) { 1 } else { 0 }),
+                            color: None,
+                            dir: None,
+                            name: None,
+                        },
+                        _ => continue,
+                    };
+                    state
+                        .registry
+                        .push(dev, SessionEvent::SendJson(ServerMessage::Control(ctrl)));
+                }
             }
         }
     }
