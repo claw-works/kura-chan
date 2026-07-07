@@ -13,12 +13,14 @@ use crate::ws::WsOut;
 const TARGET_RATE: f32 = 16000.0;
 const VAD_SPEAK_RMS: f64 = 0.02; // above this = speech
 const VAD_SILENCE_SECS: f32 = 3.0; // trailing silence to auto-stop
+const VAD_NO_SPEECH_SECS: f32 = 8.0; // give up if no speech is heard at all
 
 pub struct Recorder {
     recording: Arc<AtomicBool>,
     buffer: Arc<Mutex<Vec<i16>>>,
-    done: Arc<AtomicBool>, // VAD: speech ended (trailing silence exceeded)
-    vad: Arc<Mutex<(bool, usize)>>, // (heard speech, trailing silence samples)
+    done: Arc<AtomicBool>, // VAD: speech ended (trailing silence) OR no-speech timeout
+    vad: Arc<Mutex<(bool, usize, usize)>>, // (heard speech, trailing silence, total samples)
+    muted: Arc<AtomicBool>, // mute capture while the pet speaks (avoid its own TTS)
 }
 
 impl Recorder {
@@ -28,27 +30,34 @@ impl Recorder {
         let recording = Arc::new(AtomicBool::new(false));
         let buffer = Arc::new(Mutex::new(Vec::<i16>::new()));
         let done = Arc::new(AtomicBool::new(false));
-        let vad = Arc::new(Mutex::new((false, 0usize)));
+        let vad = Arc::new(Mutex::new((false, 0usize, 0usize)));
+        let muted = Arc::new(AtomicBool::new(false));
         std::thread::spawn({
             let rec = recording.clone();
             let buf = buffer.clone();
             let done = done.clone();
             let vad = vad.clone();
-            move || capture_thread(rec, buf, done, vad)
+            let muted = muted.clone();
+            move || capture_thread(rec, buf, done, vad, muted)
         });
-        Self { recording, buffer, done, vad }
+        Self { recording, buffer, done, vad, muted }
     }
 
     pub fn start(&self) {
         self.buffer.lock().unwrap().clear();
-        *self.vad.lock().unwrap() = (false, 0);
+        *self.vad.lock().unwrap() = (false, 0, 0);
         self.done.store(false, Ordering::Relaxed);
         self.recording.store(true, Ordering::Relaxed);
     }
 
-    /// VAD detected the user stopped talking (trailing silence exceeded).
+    /// VAD detected end of speech (trailing silence) or no-speech timeout.
     pub fn is_done(&self) -> bool {
         self.done.load(Ordering::Relaxed)
+    }
+
+    /// Mute capture while the pet is speaking (so it doesn't record its own TTS).
+    pub fn set_muted(&self, on: bool) {
+        self.muted.store(on, Ordering::Relaxed);
     }
 
     /// Stop and return the captured PCM16/16k samples.
@@ -63,7 +72,8 @@ fn capture_thread(
     recording: Arc<AtomicBool>,
     buffer: Arc<Mutex<Vec<i16>>>,
     done: Arc<AtomicBool>,
-    vad: Arc<Mutex<(bool, usize)>>,
+    vad: Arc<Mutex<(bool, usize, usize)>>,
+    muted: Arc<AtomicBool>,
 ) {
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
     let host = cpal::default_host();
@@ -87,11 +97,12 @@ fn capture_thread(
             let buf = buffer.clone();
             let done = done.clone();
             let vad = vad.clone();
+            let muted = muted.clone();
             let phase = Arc::new(Mutex::new(0.0f32));
             device.build_input_stream(
                 &config.into(),
                 move |data: &[f32], _| {
-                    if !rec.load(Ordering::Relaxed) {
+                    if !rec.load(Ordering::Relaxed) || muted.load(Ordering::Relaxed) {
                         return;
                     }
                     let mut out = buf.lock().unwrap();
@@ -121,6 +132,7 @@ fn capture_thread(
                             .sum();
                         let rms = (sum / pushed.len() as f64).sqrt();
                         let mut v = vad.lock().unwrap();
+                        v.2 += pushed.len(); // total captured samples
                         if rms > VAD_SPEAK_RMS {
                             v.0 = true; // heard speech
                             v.1 = 0; // reset trailing silence
@@ -129,6 +141,8 @@ fn capture_thread(
                             if v.1 as f32 / TARGET_RATE > VAD_SILENCE_SECS {
                                 done.store(true, Ordering::Relaxed);
                             }
+                        } else if v.2 as f32 / TARGET_RATE > VAD_NO_SPEECH_SECS {
+                            done.store(true, Ordering::Relaxed); // never heard any speech
                         }
                     }
                 },

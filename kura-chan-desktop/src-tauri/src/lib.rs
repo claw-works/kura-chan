@@ -289,6 +289,12 @@ fn is_voice_done(recorder: State<Recorder>) -> bool {
     recorder.is_done()
 }
 
+/// Mute the mic while the pet is speaking (so it doesn't record its own TTS).
+#[tauri::command]
+fn set_mic_muted(recorder: State<Recorder>, on: bool) {
+    recorder.set_muted(on);
+}
+
 /// Fetch conversation history from the server (Bearer api_key), cache it to
 /// ~/.kura/history.json, and return it. Falls back to the cache when offline.
 #[tauri::command]
@@ -439,6 +445,7 @@ pub fn run() {
             start_recording,
             stop_recording,
             is_voice_done,
+            set_mic_muted,
             read_dropped,
             get_settings,
             save_settings,

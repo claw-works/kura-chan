@@ -351,6 +351,7 @@ async function init() {
   });
   await listen("audio-start", () => {
     if (!ttsOn) return; // speaker off → no voice / mouth animation
+    void invoke("set_mic_muted", { on: true }); // don't record our own TTS
     const ctx = ensureCtx();
     nextAudioTime = ctx.currentTime;
     speaking = true;
@@ -366,6 +367,7 @@ async function init() {
     stopTalk();
     streamingBot = null;
     botBuf = "";
+    void invoke("set_mic_muted", { on: false }); // re-enable mic after speaking
   });
 
   // drag-and-drop: drop a text file onto the pet → read & send
