@@ -60,8 +60,14 @@ pub async fn run_jobs(state: Arc<AppState>) {
         }
         tracing::info!(count = due.len(), "dispatching due jobs");
         for job in due {
-            if !state.registry.is_online(&job.device_id) {
-                tracing::info!(job = %job.id, device = %job.device_id, "device offline; skip");
+            // run if ANY of this actor's devices is online (creator may be off,
+            // but e.g. the desktop should still get the reminder)
+            let any_online = match crate::db::actor_by_device(&state.db, &job.device_id).await {
+                Some(a) => !state.registry.devices_for_actor(&a.actor_id).is_empty(),
+                None => state.registry.is_online(&job.device_id),
+            };
+            if !any_online {
+                tracing::info!(job = %job.id, device = %job.device_id, "no online device for actor; skip");
                 continue;
             }
             let st = state.clone();
@@ -155,41 +161,50 @@ fn strip_tags(s: &str) -> String {
 /// Proactively speak text to a connected device: TTS + push as a full turn
 /// (state -> response -> audio frames -> speak_done -> idle).
 async fn speak_to_device(state: &Arc<AppState>, device_id: &str, text: &str) {
-    let voice = crate::db::actor_by_device(&state.db, device_id)
-        .await
-        .map(|a| a.voice)
-        .unwrap_or_default();
+    let actor = crate::db::actor_by_device(&state.db, device_id).await;
+    let voice = actor.as_ref().map(|a| a.voice.clone()).unwrap_or_default();
     let audio = state.tts.synthesize(text, crate::speech::voice_id(&voice)).await.unwrap_or_default();
     if audio.is_empty() {
         tracing::warn!(device = device_id, "TTS produced no audio; skip push");
         return;
     }
+    // push to ALL of this actor's online devices, so both firmware and desktop
+    // get the reminder (they share one api_key / actor).
+    let targets: Vec<String> = match &actor {
+        Some(a) => {
+            let devs = state.registry.devices_for_actor(&a.actor_id);
+            if devs.is_empty() { vec![device_id.to_string()] } else { devs }
+        }
+        None => vec![device_id.to_string()],
+    };
     let reg = &state.registry;
-    reg.push(device_id, SessionEvent::SendJson(ServerMessage::State(StateChange {
-        state: "speaking".into(),
-    })));
-    reg.push(device_id, SessionEvent::SendJson(ServerMessage::Response(AgentResponse {
-        text: text.to_string(),
-        emotion: "neutral".into(),
-        audio_follows: true,
-    })));
-    let mut off = 0;
-    let mut first = true;
-    while off < audio.len() {
-        let end = (off + AUDIO_CHUNK).min(audio.len());
-        let flags = if first { FLAG_START } else { 0 };
-        first = false;
-        let frame = AudioFrame {
-            frame_type: AUDIO_OUTPUT,
-            flags,
-            payload: audio[off..end].to_vec(),
-        };
-        reg.push(device_id, SessionEvent::SendAudio(frame.encode()));
-        off = end;
+    for dev in &targets {
+        reg.push(dev, SessionEvent::SendJson(ServerMessage::State(StateChange {
+            state: "speaking".into(),
+        })));
+        reg.push(dev, SessionEvent::SendJson(ServerMessage::Response(AgentResponse {
+            text: text.to_string(),
+            emotion: "neutral".into(),
+            audio_follows: true,
+        })));
+        let mut off = 0;
+        let mut first = true;
+        while off < audio.len() {
+            let end = (off + AUDIO_CHUNK).min(audio.len());
+            let flags = if first { FLAG_START } else { 0 };
+            first = false;
+            let frame = AudioFrame {
+                frame_type: AUDIO_OUTPUT,
+                flags,
+                payload: audio[off..end].to_vec(),
+            };
+            reg.push(dev, SessionEvent::SendAudio(frame.encode()));
+            off = end;
+        }
+        reg.push(dev, SessionEvent::SendJson(ServerMessage::SpeakDone));
+        reg.push(dev, SessionEvent::SendJson(ServerMessage::State(StateChange {
+            state: "idle".into(),
+        })));
     }
-    reg.push(device_id, SessionEvent::SendJson(ServerMessage::SpeakDone));
-    reg.push(device_id, SessionEvent::SendJson(ServerMessage::State(StateChange {
-        state: "idle".into(),
-    })));
-    tracing::info!(device = device_id, bytes = audio.len(), "pushed proactive speech");
+    tracing::info!(devices = ?targets, bytes = audio.len(), "pushed proactive speech");
 }
