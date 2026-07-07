@@ -111,7 +111,7 @@ async fn run_conn(
             "output_sample_rate": 16000,
             "output_channels": 1
         },
-        "capabilities": ["text", "notify", "read_file", "list_dir", "search_files", "get_clipboard", "set_clipboard", "system_info", "write_file", "open_url", "open_path", "run_command"]
+        "capabilities": ["text", "notify", "read_file", "list_dir", "search_files", "get_clipboard", "set_clipboard", "system_info", "write_file", "open_url", "open_path", "run_command", "camera"]
     });
     write
         .send(Message::Text(hello.to_string().into()))
@@ -128,7 +128,7 @@ async fn run_conn(
                         eprintln!("[tool] got tool_call: tool={} call_id={} params={}", call.tool, call.call_id, call.params);
                         // execute device tool off-thread, send ToolResult back via tx
                         let tx2 = tx.clone();
-                        tauri::async_runtime::spawn(execute_tool(tx2, call));
+                        tauri::async_runtime::spawn(execute_tool(app.clone(), tx2, call));
                     } else {
                         handle_server_text(app, s, last_sync);
                     }
@@ -222,7 +222,13 @@ fn parse_tool_call(s: &str) -> Option<DeviceToolCall> {
 }
 
 /// Run a device tool and send the ToolResult back to the server.
-async fn execute_tool(tx: mpsc::UnboundedSender<WsOut>, call: DeviceToolCall) {
+async fn execute_tool(app: AppHandle, tx: mpsc::UnboundedSender<WsOut>, call: DeviceToolCall) {
+    if call.tool == "capture_photo" {
+        // webview captures via getUserMedia and sends the ToolResult itself
+        // (see send_tool_result command); we just relay the call_id.
+        let _ = app.emit("capture-photo", &call.call_id);
+        return;
+    }
     let (status, result) = run_tool(&call.tool, &call.params).await;
     eprintln!(
         "[tool] {} → status={} result={}",

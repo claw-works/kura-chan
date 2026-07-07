@@ -342,6 +342,26 @@ async function init() {
   });
   // tray "打开聊天窗口"
   await listen("open-chat", () => void enterChat());
+  // server asked to capture a photo (camera device tool) → getUserMedia → JPEG
+  await listen<string>("capture-photo", async (e) => {
+    const callId = e.payload;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+      const video = document.createElement("video");
+      video.srcObject = stream;
+      await video.play();
+      await new Promise((r) => setTimeout(r, 350)); // let the camera warm up
+      const canvas = document.createElement("canvas");
+      canvas.width = video.videoWidth || 640;
+      canvas.height = video.videoHeight || 480;
+      canvas.getContext("2d")!.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const b64 = canvas.toDataURL("image/jpeg", 0.7).split(",")[1];
+      stream.getTracks().forEach((t) => t.stop());
+      await invoke("send_tool_result", { callId, image: b64 });
+    } catch (err) {
+      await invoke("send_tool_result", { callId, error: String(err) });
+    }
+  });
   await listen<any>("response", (e) => {
     const m = e.payload?.emotion;
     if (typeof m === "string" && m) {
