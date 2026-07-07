@@ -24,6 +24,7 @@ pub fn is_device_tool(name: &str) -> bool {
             | "open_url"
             | "open_path"
             | "run_command"
+            | "capture_photo"
     )
 }
 
@@ -132,6 +133,11 @@ pub fn available_tools(capabilities: &[String]) -> Vec<ToolDef> {
                     json!({"command": {"type": "string", "description": "要执行的 shell 命令"}}),
                     &["command"],
                 ),
+            ),
+            "camera" => push(
+                "capture_photo",
+                "调用摄像头拍一张照片，用来「看看」主人或眼前的画面。当主人说「看看我」「你看我今天怎么样」或需要用视觉了解现场时使用。返回的照片会直接给你看。",
+                obj(json!({}), &[]),
             ),
             _ => {}
         }

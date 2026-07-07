@@ -325,20 +325,35 @@ async fn run_turn(
             }
             tracing::info!(count = resp.tool_calls.len(), step, "agent requested tools");
             conv.push(ChatMessage::assistant_tool_calls(resp.tool_calls.clone()));
+            let mut pending_image: Option<String> = None;
             for tc in &resp.tool_calls {
                 let result = if crate::ws::tools::is_device_tool(&tc.name) {
                     call_device_tool(receiver, tx, &tc.id, &tc.name, tc.arguments.clone(), 30).await
                 } else {
                     Err(format!("unknown tool '{}'", tc.name))
                 };
-                let payload = match result {
-                    Ok(v) => v.to_string(),
+                match result {
+                    Ok(v) => {
+                        // camera: the image goes to the model as a vision message,
+                        // not as tool text (which would just be a base64 blob).
+                        if let Some(img) = v.get("image").and_then(|i| i.as_str()) {
+                            conv.push(ChatMessage::tool_result(tc.id.clone(), "已拍照".to_string()));
+                            pending_image = Some(img.to_string());
+                        } else {
+                            conv.push(ChatMessage::tool_result(tc.id.clone(), v.to_string()));
+                        }
+                    }
                     Err(e) => {
                         tracing::warn!(tool = %tc.name, error = %e, "tool call failed");
-                        serde_json::json!({ "error": e }).to_string()
+                        conv.push(ChatMessage::tool_result(
+                            tc.id.clone(),
+                            serde_json::json!({ "error": e }).to_string(),
+                        ));
                     }
-                };
-                conv.push(ChatMessage::tool_result(tc.id.clone(), payload));
+                }
+            }
+            if let Some(img) = pending_image {
+                conv.push(ChatMessage::user_with_image("（这是刚拍到的画面，请看）", img));
             }
         }
     }

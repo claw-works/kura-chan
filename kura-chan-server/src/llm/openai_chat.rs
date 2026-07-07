@@ -118,7 +118,19 @@ impl LlmProvider for OpenaiChatProvider {
         }
         for m in &req.messages {
             match m.role {
-                Role::User => msgs.push(json!({"role": "user", "content": m.content})),
+                Role::User => {
+                    if let Some(img) = &m.image_b64 {
+                        msgs.push(json!({
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": m.content},
+                                {"type": "image_url", "image_url": {"url": format!("data:image/jpeg;base64,{img}")}}
+                            ]
+                        }));
+                    } else {
+                        msgs.push(json!({"role": "user", "content": m.content}));
+                    }
+                }
                 Role::Assistant => {
                     if m.tool_calls.is_empty() {
                         msgs.push(json!({"role": "assistant", "content": m.content}));

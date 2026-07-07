@@ -60,17 +60,23 @@ pub struct ChatMessage {
     pub tool_calls: Vec<ToolCall>,
     /// Which call this message answers (Role::Tool).
     pub tool_call_id: Option<String>,
+    /// JPEG base64 image for vision (Role::User); providers that support images
+    /// send it as a multimodal message.
+    pub image_b64: Option<String>,
 }
 
 impl ChatMessage {
     pub fn user(content: impl Into<String>) -> Self {
-        Self { role: Role::User, content: content.into(), tool_calls: Vec::new(), tool_call_id: None }
+        Self { role: Role::User, content: content.into(), tool_calls: Vec::new(), tool_call_id: None, image_b64: None }
+    }
+    pub fn user_with_image(content: impl Into<String>, image_b64: impl Into<String>) -> Self {
+        Self { role: Role::User, content: content.into(), tool_calls: Vec::new(), tool_call_id: None, image_b64: Some(image_b64.into()) }
     }
     pub fn assistant(content: impl Into<String>) -> Self {
-        Self { role: Role::Assistant, content: content.into(), tool_calls: Vec::new(), tool_call_id: None }
+        Self { role: Role::Assistant, content: content.into(), tool_calls: Vec::new(), tool_call_id: None, image_b64: None }
     }
     pub fn assistant_tool_calls(tool_calls: Vec<ToolCall>) -> Self {
-        Self { role: Role::Assistant, content: String::new(), tool_calls, tool_call_id: None }
+        Self { role: Role::Assistant, content: String::new(), tool_calls, tool_call_id: None, image_b64: None }
     }
     pub fn tool_result(call_id: impl Into<String>, content: impl Into<String>) -> Self {
         Self {
@@ -78,6 +84,7 @@ impl ChatMessage {
             content: content.into(),
             tool_calls: Vec::new(),
             tool_call_id: Some(call_id.into()),
+            image_b64: None,
         }
     }
 }
