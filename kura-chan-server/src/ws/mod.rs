@@ -471,7 +471,7 @@ async fn run_turn(
                 .into_iter()
                 .filter(|d| d != device_id)
                 .collect();
-            tracing::info!(actor = %actor.actor_id, ?others, appearance = %actor.appearance, "broadcast appearance sync");
+            tracing::debug!(actor = %actor.actor_id, targets = others.len(), "broadcast appearance to other devices");
             for dev in &others {
                 state.registry.push(dev, sync_msg(actor, true, growth.xp_base));
                 // Replay this turn's appearance controls: firmware applies ControlMessage
