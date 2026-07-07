@@ -98,7 +98,7 @@ async fn handle_socket(socket: WebSocket, device_id: String, mut actor: Actor, s
     // (heartbeat/scheduler, via the registry) both push events through `tx`;
     // the writer owns the sink and serializes them onto the socket.
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<SessionEvent>();
-    state.registry.register(&device_id, tx.clone());
+    state.registry.register(&device_id, &actor.actor_id, tx.clone());
     let writer = tokio::spawn(async move {
         while let Some(ev) = rx.recv().await {
             let msg = match ev {
@@ -463,6 +463,15 @@ async fn run_turn(
         // (e.g. desktop) actually re-render the new outfit/hairstyle.
         let full = !appearance_ops.is_empty();
         send_event(tx, sync_msg(actor, full, growth.xp_base)).await;
+        if full {
+            // appearance changed → also push to this actor's OTHER online devices
+            // (e.g. firmware changed outfit → desktop should follow, and vice versa)
+            for dev in state.registry.devices_for_actor(&actor.actor_id) {
+                if dev != device_id {
+                    state.registry.push(&dev, sync_msg(actor, true, growth.xp_base));
+                }
+            }
+        }
     }
     if want_new_session {
         if let Ok(sid) = db::new_session(&state.db, &actor.actor_id).await {

@@ -12,7 +12,7 @@ pub type DeviceTx = mpsc::UnboundedSender<SessionEvent>;
 /// tasks (heartbeat, scheduler) proactively push messages/audio to a device.
 #[derive(Default)]
 pub struct SessionRegistry {
-    devices: Mutex<HashMap<String, DeviceTx>>,
+    devices: Mutex<HashMap<String, (String, DeviceTx)>>, // device_id -> (actor_id, tx)
 }
 
 impl SessionRegistry {
@@ -21,8 +21,11 @@ impl SessionRegistry {
     }
 
     /// Register (or replace) a device's outbound sender on connect.
-    pub fn register(&self, device_id: &str, tx: DeviceTx) {
-        self.devices.lock().unwrap().insert(device_id.to_string(), tx);
+    pub fn register(&self, device_id: &str, actor_id: &str, tx: DeviceTx) {
+        self.devices
+            .lock()
+            .unwrap()
+            .insert(device_id.to_string(), (actor_id.to_string(), tx));
         tracing::info!(device_id, online = self.online_count(), "device registered");
     }
 
@@ -49,8 +52,19 @@ impl SessionRegistry {
     pub fn push(&self, device_id: &str, event: SessionEvent) -> bool {
         let guard = self.devices.lock().unwrap();
         match guard.get(device_id) {
-            Some(tx) => tx.send(event).is_ok(),
+            Some((_, tx)) => tx.send(event).is_ok(),
             None => false,
         }
+    }
+
+    /// device_ids of all online devices belonging to `actor_id`.
+    pub fn devices_for_actor(&self, actor_id: &str) -> Vec<String> {
+        self.devices
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, (aid, _))| aid == actor_id)
+            .map(|(did, _)| did.clone())
+            .collect()
     }
 }
