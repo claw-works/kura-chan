@@ -207,8 +207,11 @@ async fn handle_socket(socket: WebSocket, device_id: String, mut actor: Actor, s
                     };
                     // Empty STT (silence/noise) → canned phrase; still device-locked
                     // so it can't clash with a scheduled job's audio.
-                    if stt_text.trim().is_empty() {
-                        tracing::info!("Empty STT, playing canned phrase");
+                    if stt_text.trim().is_empty()
+                        || stt_text.contains("小爪没听清")
+                        || stt_text.contains("脑袋有点卡住")
+                    {
+                        tracing::info!(stt = %stt_text, "empty/self-echo STT, playing canned phrase");
                         let dev_lock = state.device_lock(&device_id).await;
                         let _g = dev_lock.lock().await;
                         let audio = state.canned_audio(PHRASE_NOT_HEARD, crate::speech::voice_id(&actor.voice)).await;
