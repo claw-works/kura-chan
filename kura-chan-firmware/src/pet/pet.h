@@ -60,4 +60,9 @@ void setBg(const char* name);            // scene background (fetched from /asse
 void showStatus(bool on);              // show/hide the status page
 void setStatusText(const char* text);  // '\n'-separated lines for the status page
 
+// ===== Camera capture overlay =====
+// Drawn by the render task (single-owner LCD rule). main toggles it around a
+// capture_photo tool call so the user sees the device is taking/sending a photo.
+void setCapturing(bool on);
+
 }  // namespace pet

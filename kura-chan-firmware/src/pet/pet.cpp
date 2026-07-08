@@ -623,6 +623,7 @@ static TaskHandle_t renderHandle = nullptr;
 // shared SPI bus (blank/garbled screen). main feeds the page via setStatusText()
 // and toggles it with showStatus(); the render task owns all pixels.
 static volatile bool g_showStatus = false;
+static volatile bool g_capturing = false;
 static char g_statusText[640] = {0};
 
 static void drawStatusPage() {
@@ -653,14 +654,46 @@ static void drawStatusPage() {
     g.pushSprite(0, 0);
 }
 
+// Camera-capture banner: a small camera glyph + "Photo..." drawn over the live
+// face while a capture_photo tool call is in flight (init+encode+upload ~1-2s).
+// Built-in fonts are ASCII-only, so the recognizable icon carries the meaning.
+static void drawCaptureOverlay() {
+    auto& g = canvas;
+    const int bh = 40;
+    const int bw = SCR_W - 72;
+    const int bx = 36;
+    const int by = (SCR_H - bh) / 2;
+    const uint16_t accent = g.color565(0xFF, 0xD2, 0x4A);
+    const uint16_t dark   = g.color565(0x0C, 0x0C, 0x18);
+    g.fillRoundRect(bx, by, bw, bh, 8, dark);
+    g.drawRoundRect(bx, by, bw, bh, 8, accent);
+    // camera icon
+    const int ix = bx + 16, iy = by + bh / 2;
+    g.fillRect(ix + 7, iy - 12, 9, 5, accent);            // viewfinder bump
+    g.fillRoundRect(ix, iy - 8, 28, 18, 3, accent);       // body
+    g.fillCircle(ix + 14, iy + 1, 5, dark);               // lens
+    g.setFont(&fonts::Font4);
+    g.setTextSize(1);
+    g.setTextColor(0xFFFF);
+    g.setTextDatum(middle_left);
+    g.drawString("Photo...", ix + 40, iy);
+    g.setTextDatum(top_left);
+    g.pushSprite(0, 0);
+}
+
 static void renderTask(void*) {
     for (;;) {
         if (g_showStatus) { drawStatusPage(); vTaskDelay(pdMS_TO_TICKS(150)); }
-        else { renderFrame(millis()); vTaskDelay(pdMS_TO_TICKS(45)); }
+        else {
+            renderFrame(millis());
+            if (g_capturing) drawCaptureOverlay();   // banner on top of the live face
+            vTaskDelay(pdMS_TO_TICKS(45));
+        }
     }
 }
 
 void showStatus(bool on) { g_showStatus = on; }
+void setCapturing(bool on) { g_capturing = on; }
 void setStatusText(const char* t) {
     if (!t) return;
     strncpy(g_statusText, t, sizeof g_statusText - 1);

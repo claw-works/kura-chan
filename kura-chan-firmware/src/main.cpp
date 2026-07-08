@@ -769,6 +769,7 @@ static void handleServerJson(uint8_t* payload, size_t length) {
         const char* tool = doc["tool"];
         if (tool && strcmp(tool, "capture_photo") == 0) {
             Serial.println("[CAM] capture_photo requested");
+            pet::setCapturing(true);          // show "Photo..." banner while capturing/uploading
             size_t b64len = 0;
             char* b64 = cam::capture_jpeg_base64(&b64len);
             if (b64) {
@@ -777,6 +778,7 @@ static void handleServerJson(uint8_t* payload, size_t length) {
             } else {
                 send_tool_error(call_id, "camera capture failed");
             }
+            pet::setCapturing(false);
             return;
         }
         // Unknown/no-op device tool: acknowledge with an empty ok result.
